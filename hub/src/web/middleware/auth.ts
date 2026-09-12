@@ -14,6 +14,16 @@ const jwtPayloadSchema = z.object({
     ns: z.string()
 })
 
+/** Used by HTTP middleware and the WebSocket upgrade path before provider credentials are accessed. */
+export async function verifyOwnerJwt(token: string, jwtSecret: Uint8Array) {
+    const verified = await jwtVerify(token, jwtSecret, { algorithms: ['HS256'] })
+    const audiences = Array.isArray(verified.payload.aud) ? verified.payload.aud : [verified.payload.aud]
+    if (audiences.includes('hapi-peer') || verified.payload.scope === 'peer:send') {
+        throw new Error('Peer capabilities cannot access owner APIs')
+    }
+    return jwtPayloadSchema.parse(verified.payload)
+}
+
 export function createAuthMiddleware(jwtSecret: Uint8Array): MiddlewareHandler<WebAppEnv> {
     return async (c, next) => {
         const path = c.req.path
@@ -32,14 +42,9 @@ export function createAuthMiddleware(jwtSecret: Uint8Array): MiddlewareHandler<W
         }
 
         try {
-            const verified = await jwtVerify(token, jwtSecret, { algorithms: ['HS256'] })
-            const parsed = jwtPayloadSchema.safeParse(verified.payload)
-            if (!parsed.success) {
-                return c.json({ error: 'Invalid token payload' }, 401)
-            }
-
-            c.set('userId', parsed.data.uid)
-            c.set('namespace', parsed.data.ns)
+            const principal = await verifyOwnerJwt(token, jwtSecret)
+            c.set('userId', principal.uid)
+            c.set('namespace', principal.ns)
             await next()
             return
         } catch {

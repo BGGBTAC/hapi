@@ -412,7 +412,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     };
 
     // Helper functions
-    const getCurrentChildren = () => Array.from(pidToTrackedSession.values());
+    const getCurrentChildren = (): TrackedSession[] => [
+      ...pidToTrackedSession.values(),
+      ...[...persistedResumeProcesses.values()].flatMap((record): TrackedSession[] => {
+        // Recovered children have no ChildProcess handle. Keep them visible while
+        // leaving stop requests on the generation-checked fallback below.
+        if (pidToTrackedSession.has(record.pid) || !record.confirmedSessionId
+          || pidToConfirmedSessionId.get(record.pid) !== record.confirmedSessionId) return [];
+        return [{ startedBy: 'runner (recovered)', pid: record.pid,
+          happySessionId: record.confirmedSessionId, requestedHappySessionId: record.requestedSessionId }];
+      })
+    ];
 
     // Handle webhook from HAPI session reporting itself
     const onHappySessionWebhook = (sessionId: string, sessionMetadata: Metadata) => {
@@ -429,6 +439,23 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
       // Check if we already have this PID (runner-spawned)
       const existingSession = pidToTrackedSession.get(pid);
+
+      const recovered = persistedResumeProcesses.get(pid);
+      if (!existingSession && recovered) {
+        // Quarantine an unverifiable or reused PID; it must never fall through
+        // to the legacy orphan termination path below.
+        if (getProcessStartMarker(pid) !== recovered.processStartMarker) return;
+        // A verified child may reconnect or change its HAPI row after /clear.
+        // It is already owned by this runner generation, not a late orphan.
+        recovered.confirmedSessionId = sessionId;
+        pidToRequestedSessionId.set(pid, recovered.requestedSessionId);
+        pidToConfirmedSessionId.set(pid, sessionId);
+        spawnSession.recoverChild(recovered.requestedSessionId, { type: 'success', sessionId });
+        invalidateVerifiedExit(sessionId);
+        invalidateVerifiedExit(`PID-${pid}`);
+        persistResumeProcesses();
+        return;
+      }
 
       if (existingSession && existingSession.startedBy === 'runner') {
         // Update runner-spawned session with reported data

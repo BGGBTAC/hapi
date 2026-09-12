@@ -6,6 +6,8 @@ import { MachineStore } from './machineStore'
 import { MessageStore } from './messageStore'
 import { addMessage } from './messages'
 import type { StoredMessage } from './types'
+import type { PeerMessageMetadata } from '@hapi/protocol/schemas'
+import { externalLocalId } from './peerMetadata'
 import { PushStore } from './pushStore'
 import { FcmStore } from './fcmStore'
 import { ScratchlistStore } from './scratchlistStore'
@@ -42,7 +44,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 25
+const SCHEMA_VERSION: number = 26
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -204,8 +206,10 @@ export class Store {
         sessionId: string,
         content: unknown,
         localId?: string,
-        scheduledAt?: number | null
+        scheduledAt?: number | null,
+        trustedPeer?: PeerMessageMetadata
     ): { sessionId: string; message: StoredMessage; inserted: boolean } {
+        const storageLocalId = localId && !trustedPeer ? externalLocalId(localId) : localId
         return this.db.transaction(() => {
             const row = this.db.prepare('SELECT namespace, metadata FROM sessions WHERE id = ?').get(sessionId) as { namespace: string; metadata: string | null } | undefined
             if (!row) throw new Error('Message source session not found')
@@ -223,13 +227,13 @@ export class Store {
                     .get(targetSessionId, row.namespace)
                 if (!target) throw new Error('OpenCode clear redirect target is unavailable in the source namespace')
             }
-            const alreadyExists = localId
+            const alreadyExists = storageLocalId
                 ? Boolean(this.db.prepare('SELECT 1 FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1')
-                    .get(targetSessionId, localId))
+                    .get(targetSessionId, storageLocalId))
                 : false
             return {
                 sessionId: targetSessionId,
-                message: addMessage(this.db, targetSessionId, content, localId, scheduledAt),
+                message: addMessage(this.db, targetSessionId, content, localId, scheduledAt, undefined, trustedPeer),
                 inserted: !alreadyExists
             }
         })()
@@ -347,6 +351,7 @@ export class Store {
             22: () => this.migrateFromV22ToV23(),
             23: () => this.migrateFromV23ToV24(),
             24: () => this.migrateFromV24ToV25(),
+            25: () => this.migrateFromV25ToV26(),
         })
 
         if (currentVersion === 0) {
@@ -447,6 +452,7 @@ export class Store {
                 invoked_at INTEGER,
                 scheduled_at INTEGER,
                 delivery_state TEXT NOT NULL DEFAULT 'queued',
+                peer_authenticated INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
@@ -974,6 +980,14 @@ export class Store {
         const messageColumns = this.getMessageColumnNames()
         if (messageColumns.size > 0 && !messageColumns.has('delivery_state')) {
             this.db.exec("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'queued'")
+        }
+    }
+
+    /** Existing JSON may contain forged meta.peer; only a hub-owned column can distinguish it. */
+    private migrateFromV25ToV26(): void {
+        const columns = this.getMessageColumnNames()
+        if (columns.size > 0 && !columns.has('peer_authenticated')) {
+            this.db.exec('ALTER TABLE messages ADD COLUMN peer_authenticated INTEGER NOT NULL DEFAULT 0')
         }
     }
 

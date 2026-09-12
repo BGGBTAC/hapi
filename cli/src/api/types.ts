@@ -3,6 +3,7 @@ import {
     AttachmentMetadataSchema,
     MachineMetadataSchema,
     MetadataSchema,
+    PeerMessageMetadataSchema,
     RunnerStateSchema
 } from '@hapi/protocol/schemas'
 import {
@@ -70,6 +71,8 @@ export type {
 }
 
 export const MessageMetaSchema = z.object({
+    // Reads tolerate future Hub fields; authenticated Hub ingress remains strict.
+    peer: PeerMessageMetadataSchema.strip().optional(),
     sentFrom: z.string().optional(),
     // Claude jsonl echoes the remote (web/telegram) prompt as a second user row.
     // Hub notify ingest skips these so they do not consume a work_ad cause slot.

@@ -11,6 +11,7 @@ import {
 } from '@hapi/protocol/messages'
 import { isObject } from '@hapi/protocol'
 import type { MessageDeliveryMode, MessagesResponse, QueuedStateResponse } from '@hapi/protocol/apiTypes'
+import type { PeerMessageMetadata } from '@hapi/protocol/schemas'
 import type { Server } from 'socket.io'
 import { randomUUID } from 'node:crypto'
 import type { Store, CancelQueuedMessageResult } from '../store'
@@ -808,8 +809,9 @@ export class MessageService {
             sentFrom?: 'telegram-bot' | 'webapp'
             scheduledAt?: number | null
             deliveryMode?: MessageDeliveryMode
-        }
-    ): Promise<{ actualSessionId: string; createdAt: number }> {
+        },
+        trustedPeer?: PeerMessageMetadata
+    ): Promise<{ actualSessionId: string; createdAt: number; messageId: string; localId: string | null }> {
         // Defence-in-depth invariant for non-REST callers (Telegram bot, MCP,
         // internal callers).  Attachment paths live under the CLI session's
         // upload directory which `cleanupUploadDir` purges on session end; a
@@ -846,7 +848,8 @@ export class MessageService {
             sessionId,
             content,
             payload.localId ?? undefined,
-            payload.scheduledAt ?? null
+            payload.scheduledAt ?? null,
+            trustedPeer
         )
         const actualSessionId = inserted.sessionId
         const msg = inserted.message
@@ -902,11 +905,11 @@ export class MessageService {
                 ...(msg.deliveryState ? { deliveryState: msg.deliveryState } : {})
             }
         })
-        return { actualSessionId, createdAt: msg.createdAt }
+        return { actualSessionId, createdAt: msg.createdAt, messageId: msg.id, localId: msg.localId }
     }
 
     /**
-     * Force-invoke all immediate-queued messages for a session at session end.
+     * Force-invoke ordinary immediate-queued messages for a session at session end.
      *
      * Called by sessionHandlers when the CLI sends 'session-end', so that
      * the floating bar is cleared without leaving queued rows pinned forever.
@@ -917,6 +920,8 @@ export class MessageService {
      * sweep stamped a mature scheduled row, a subsequent re-attach would never
      * see the row in the next mature-scan tick and the user's prompt would be
      * silently dropped.  See HAPI Bot R4 finding.
+     * Authenticated peer rows also remain queued until an actual consumption ack;
+     * stopping a session is not evidence that an agent processed the message.
      *
      * Returns the list of localIds that were stamped and the invokedAt timestamp,
      * or null if no messages needed sweeping.
@@ -927,6 +932,10 @@ export class MessageService {
     ): { localIds: string[]; invokedAt: number } | null {
         const queued = this.store.messages.getImmediateQueuedLocalMessages(sessionId)
         const localIds = queued
+            .filter(m => {
+                const record = unwrapRoleWrappedRecordEnvelope(m.content)
+                return !isObject(record?.meta) || !record.meta.peer
+            })
             .map((m) => m.localId)
             .filter((id): id is string => typeof id === 'string')
         if (localIds.length === 0) return null

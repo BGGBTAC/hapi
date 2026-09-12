@@ -1,4 +1,23 @@
 import { z } from 'zod'
+
+/** Reserved hub-authenticated provenance; external message writers may not set this. */
+export const PeerMessageMetadataSchema = z.object({
+    senderSessionId: z.string().min(1).max(200),
+    senderName: z.string().max(500).optional(),
+    senderFlavor: z.string().max(100).optional(),
+    originalText: z.string().max(100_000).optional(),
+    replyToSessionId: z.string().min(1).max(200).optional(),
+    replyTo: z.string().min(1).max(200).optional()
+}).strict()
+export type PeerMessageMetadata = z.infer<typeof PeerMessageMetadataSchema>
+
+export const SendPeerMessageRequestSchema = z.object({
+    recipientSessionId: z.string().min(1).max(200),
+    text: z.string().min(1).max(100_000),
+    localId: z.string().min(1).max(200),
+    replyTo: z.string().min(1).max(200).optional()
+}).strict()
+export type SendPeerMessageRequest = z.infer<typeof SendPeerMessageRequestSchema>
 import { COPILOT_AGENT_MODES, type CopilotAgentMode } from './copilotModes'
 import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
 import { AgentConfigDescriptorSchema } from './agentConfig'

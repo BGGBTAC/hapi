@@ -14,6 +14,9 @@ import {
 } from '@hapi/protocol/runnerCapabilities'
 import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
 import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+import { PeerMessageMetadataSchema, SendPeerMessageRequestSchema, type SendPeerMessageRequest } from '@hapi/protocol/schemas'
+import { formatPeerMessageText, isObject } from '@hapi/protocol'
+import { PeerMessageAccessError } from '../store/peerMetadata'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
@@ -1018,6 +1021,46 @@ export class SyncEngine {
         const { actualSessionId, createdAt: activeTurnStartedAt } = await this.messageService.sendMessage(sessionId, payload)
         this.sessionCache.markMessageQueued(actualSessionId, Date.now(), activeTurnStartedAt)
         this.sessionCache.recordSessionActivity(actualSessionId, Date.now())
+    }
+
+    /** Sender identity comes only from the peer capability verified by the hub route. */
+    async sendPeerMessage(senderSessionId: string, namespace: string, input: SendPeerMessageRequest) {
+        const payload = SendPeerMessageRequestSchema.parse(input)
+        const sender = this.getSessionByNamespace(senderSessionId, namespace)
+        const recipient = this.getSessionByNamespace(payload.recipientSessionId, namespace)
+        if (!sender || !recipient) throw new PeerMessageAccessError('Peer session not found in namespace', 404)
+        if (!sender.active || !recipient.active) throw new PeerMessageAccessError('Peer session is inactive', 409)
+        if (this.historyActionsInFlight.has(recipient.id)) throw new PeerMessageAccessError('Conversation history action in progress', 409)
+        if (payload.replyTo) {
+            const original = this.store.messages.getMessageById(sender.id, payload.replyTo)
+            const content = original && isObject(original.content) ? original.content : {}
+            const meta = isObject(content.meta) ? content.meta : {}
+            const previous = PeerMessageMetadataSchema.safeParse(meta.peer)
+            if (!previous.success || previous.data.senderSessionId !== recipient.id) {
+                throw new PeerMessageAccessError('replyTo must identify a peer message received from this recipient', 403)
+            }
+        }
+        const peer = {
+            senderSessionId: sender.id,
+            originalText: payload.text,
+            ...(sender.metadata?.name ? { senderName: sender.metadata.name.slice(0, 500) } : {}),
+            ...(sender.metadata?.flavor ? { senderFlavor: sender.metadata.flavor.slice(0, 100) } : {}),
+            ...(payload.replyTo ? { replyTo: payload.replyTo, replyToSessionId: sender.id } : {})
+        }
+        const result = await this.messageService.sendMessage(recipient.id, {
+            text: formatPeerMessageText(peer, payload.text),
+            localId: `peer:${encodeURIComponent(sender.id)}:${encodeURIComponent(payload.localId)}`,
+            deliveryMode: 'queue'
+        }, peer)
+        this.sessionCache.markMessageQueued(result.actualSessionId, Date.now(), result.createdAt)
+        this.sessionCache.recordSessionActivity(result.actualSessionId, Date.now())
+        return {
+            status: 'persisted' as const,
+            recipientSessionId: result.actualSessionId,
+            senderSessionId: sender.id,
+            messageId: result.messageId,
+            localId: payload.localId
+        }
     }
 
     async cancelQueuedMessage(
