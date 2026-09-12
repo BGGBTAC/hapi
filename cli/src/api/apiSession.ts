@@ -34,6 +34,7 @@ import type {
     UserMessage
 } from './types'
 import { AgentStateSchema, CliMessagesResponseSchema, MetadataSchema, UserMessageSchema } from './types'
+import { framePeerMessage } from './peerMessage'
 import { RpcHandlerManager } from './rpc/RpcHandlerManager'
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
 import { cleanupUploadDir } from '../modules/common/handlers/uploads'
@@ -785,7 +786,7 @@ export class ApiSessionClient extends EventEmitter {
             if (userResult.data.meta?.sentFrom === 'cli') {
                 return
             }
-            this.enqueueUserMessage(userResult.data, message.localId ?? undefined)
+            this.enqueueUserMessage(framePeerMessage(userResult.data, message.id), message.localId ?? undefined)
             return
         }
 

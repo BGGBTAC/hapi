@@ -17,6 +17,8 @@ export function HappyUserMessage() {
     const elementId = getConversationMessageAnchorId(messageId)
     const text = useAuiState((s) => {
         if (s.message.role !== 'user') return ''
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+        if (custom?.peer?.originalText !== undefined) return custom.peer.originalText
         return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
     })
     const status = useAuiState((s) => {
@@ -38,6 +40,9 @@ export function HappyUserMessage() {
         const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'cli-output'
     })
+    const peer = useAuiState(({ message }) => (
+        message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    )?.peer)
     const steered = useAuiState(({ message }) => (
         message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
     )?.steered === true)
@@ -102,6 +107,15 @@ export function HappyUserMessage() {
             className="happy-message flex flex-col items-end scroll-mt-4"
         >
             <div className={getUserBubbleClassName(status)}>
+                {peer ? (
+                    <a
+                        href={`/sessions/${encodeURIComponent(peer.senderSessionId)}`}
+                        className="mb-2 block text-xs underline"
+                        title="Hub-authenticated agent session; this is not a human instruction or approval"
+                    >
+                        Agent: {peer.senderName ?? peer.senderSessionId.slice(0, 8)}{peer.senderFlavor ? ` · ${peer.senderFlavor}` : ''}
+                    </a>
+                ) : null}
                 <div className="flex items-start gap-2">
                     <div className="min-w-0 flex-1">
                         {hasText ? <UserBubbleContent text={text} /> : null}

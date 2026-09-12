@@ -157,6 +157,16 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
             'inspect_peer'
         ])
     })
+
+    it('preserves ping_peer idempotency and reply fields through STDIO schema parsing', async () => {
+        await runHappyMcpStdioBridge(['--url', 'http://127.0.0.1:43006', '--tools', 'ping_peer'])
+        const input = { sessionIdPrefix: 'target-session', message: '/clear', localId: 'stable-retry-key', replyTo: 'received-message-id' }
+        const schema = harness.configs.get('ping_peer')!.inputSchema as { parse(value: unknown): Record<string, unknown> }
+        const parsed = schema.parse(input)
+        expect(parsed).toEqual(input)
+        await harness.tools.get('ping_peer')!(parsed)
+        expect(harness.callTool).toHaveBeenCalledWith({ name: 'ping_peer', arguments: input })
+    })
     it('registers list_peers when included in --tools', async () => {
         await runHappyMcpStdioBridge([
             '--url',

@@ -199,6 +199,8 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
     const pingPeerInputSchema: z.ZodTypeAny = z.object({
       sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
       message: z.string().min(1).describe('Message text to deliver to the target session'),
+      localId: z.string().min(1).max(200).optional().describe('Stable request key to reuse for retries of identical content'),
+      replyTo: z.string().min(1).max(200).optional().describe('Hub messageId of a received peer message from the target'),
     });
 
     if (toolNames.has('ping_peer')) {

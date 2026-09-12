@@ -9,6 +9,7 @@ import {
     claimIndeterminateMessage,
     lookupQueuedMessage,
     getMessages,
+    getMessageById,
     getFirstMessages,
     getDeliverableMessagesAfter,
     getMessagesByPosition,
@@ -75,6 +76,10 @@ export class MessageStore {
 
     getAllMessages(sessionId: string): StoredMessage[] {
         return getAllMessages(this.db, sessionId)
+    }
+
+    getMessageById(sessionId: string, messageId: string): StoredMessage | null {
+        return getMessageById(this.db, sessionId, messageId)
     }
 
     getMessagesAfterSeq(sessionId: string, afterSeq: number): StoredMessage[] {

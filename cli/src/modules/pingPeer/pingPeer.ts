@@ -9,6 +9,7 @@
  */
 
 import axios, { type AxiosInstance } from 'axios'
+import { randomUUID } from 'node:crypto'
 import { extractAssistantPlainText, isObject } from '@hapi/protocol'
 import { normalizeSessionIdPrefix } from '@hapi/protocol/sessionCitation'
 import { configuration } from '@/configuration'
@@ -52,6 +53,11 @@ export type PingPeerSessionSummary = {
 export type PingPeerOptions = {
     sessionIdPrefix: string
     message: string
+    /** Set only by the trusted session wrapper; never an MCP input parameter. */
+    senderSessionId?: string
+    localId?: string
+    replyTo?: string
+    peerCapabilities?: PeerCapabilityCache
     waitActiveSecs?: number
     apiUrl?: string
     accessToken?: string
@@ -65,6 +71,29 @@ export type PingPeerResult = {
     sessionId: string
     name: string
     resumed: boolean
+    localId?: string
+    messageId?: string
+}
+
+/** Scoped tokens stay in the wrapper's memory and are renewed before expiry. */
+export class PeerCapabilityCache {
+    private current?: { senderSessionId: string; recipientSessionId: string; apiUrl: string; token: string; expiresAt: number }
+
+    invalidate(): void { this.current = undefined }
+
+    async get(apiUrl: string, ownerJwt: string, senderSessionId: string, recipientSessionId: string, http: AxiosInstance, now = Date.now()): Promise<string> {
+        if (this.current?.senderSessionId === senderSessionId && this.current.recipientSessionId === recipientSessionId && this.current.apiUrl === apiUrl && this.current.expiresAt > now + 30_000) {
+            return this.current.token
+        }
+        const response = await http.post(`${apiUrl}/api/sessions/${encodeURIComponent(senderSessionId)}/peer-capability`, { recipientSessionId }, {
+            headers: authHeaders(ownerJwt), timeout: 10_000, validateStatus: () => true
+        })
+        if (response.status !== 200 || typeof response.data?.token !== 'string' || !Number.isFinite(response.data?.expiresAt)) {
+            throw new PingPeerError('auth_failed', 'Hub could not issue a scoped peer capability; update the hub to support authenticated peer messages.')
+        }
+        this.current = { senderSessionId, recipientSessionId, apiUrl, token: response.data.token, expiresAt: response.data.expiresAt }
+        return this.current.token
+    }
 }
 
 export type ListPeerSessionsOptions = {
@@ -516,12 +545,39 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
     }
 
     onProgress?.(`sending message (${message.length} chars)...`)
-    await sendMessage(apiUrl, jwt, matched.id, message, http)
+    let receipt: { localId: string; messageId: string } | undefined
+    if (options.senderSessionId) {
+        const localId = options.localId ?? randomUUID()
+        const capabilities = options.peerCapabilities ?? new PeerCapabilityCache()
+        try {
+            for (let attempt = 0; attempt < 2; attempt++) {
+                const capability = await capabilities.get(apiUrl, jwt, options.senderSessionId, matched.id, http, now())
+                const response = await http.post(`${apiUrl}/peer/messages`, {
+                    recipientSessionId: matched.id, text: message, localId,
+                    ...(options.replyTo ? { replyTo: options.replyTo } : {})
+                }, { headers: authHeaders(capability), timeout: 30_000, validateStatus: () => true })
+                if (response.status === 401 && attempt === 0) { capabilities.invalidate(); continue }
+                if (response.status !== 200 || response.data?.status !== 'persisted' || typeof response.data?.messageId !== 'string') {
+                    const detail = typeof response.data?.error === 'string' ? response.data.error : `HTTP ${response.status}`
+                    throw new PingPeerError('send_failed', `Peer message was not confirmed persisted: ${detail}. Retry using localId ${localId}`)
+                }
+                receipt = { localId, messageId: response.data.messageId }
+                break
+            }
+        } catch (error) {
+            const code = error instanceof PingPeerError ? error.code : 'send_failed'
+            const detail = error instanceof PingPeerError ? error.message : 'Peer request failed before persistence could be confirmed.'
+            throw new PingPeerError(code, `${detail} Request localId: ${localId}`)
+        }
+    } else {
+        await sendMessage(apiUrl, jwt, matched.id, message, http)
+    }
 
     return {
         sessionId: matched.id,
         name,
-        resumed
+        resumed,
+        ...receipt
     }
 }
 
@@ -714,7 +770,7 @@ export function formatInspectPeerReport(result: InspectPeerResult): string {
         lines.push('(no extractable user/assistant text in this page)')
     } else {
         for (const message of result.messages) {
-            lines.push(`[${message.role}] ${message.text}`)
+            lines.push(`[${message.role}] ${message.text}${message.id ? ` (messageId: ${message.id})` : ''}`)
         }
     }
     return lines.join('\n')

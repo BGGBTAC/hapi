@@ -5,6 +5,26 @@ on:
     pull_request:
 
 jobs:
+    service-topology:
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+            - name: Start the disposable runner's user service manager
+              run: |
+                  test_uid="$(id -u)"
+                  sudo loginctl enable-linger "$USER"
+                  sudo systemctl start "user@${test_uid}.service"
+                  echo "XDG_RUNTIME_DIR=/run/user/${test_uid}" >> "$GITHUB_ENV"
+                  echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${test_uid}/bus" >> "$GITHUB_ENV"
+            - name: Verify rollout lockout and configuration recovery
+              env:
+                  PYTHONDONTWRITEBYTECODE: '1'
+              run: |
+                  python3 scripts/dev/peer-activate.test.py
+                  python3 scripts/dev/peer-service-config.test.py
+                  python3 scripts/dev/peer-service-topology.test.py
+                  python3 scripts/dev/peer-service-supervisor.test.py
+
     test:
         runs-on: ubuntu-latest
         steps:

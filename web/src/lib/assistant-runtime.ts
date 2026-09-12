@@ -9,6 +9,7 @@ import {
     type ComposerSendIntent,
 } from '@/lib/messageDelivery'
 import { safeStringify } from '@hapi/protocol'
+import { PeerMessageMetadataSchema, type PeerMessageMetadata } from '@hapi/protocol/schemas'
 import { renderEventLabel } from '@/chat/presentation'
 import type { ChatBlock, CliOutputBlock, CodexReview, UsageData } from '@/chat/types'
 import type { AgentEvent, ToolCallBlock } from '@/chat/types'
@@ -40,6 +41,7 @@ export type HappyChatMessageMetadata = {
     attachments?: AttachmentMetadata[]
     invokedAt?: number | null
     steered?: boolean
+    peer?: PeerMessageMetadata
     durationMs?: number
     usage?: UsageData
     model?: string | null
@@ -476,7 +478,10 @@ function toThreadMessageLike(
                     originalText: block.originalText,
                     attachments: block.attachments,
                     invokedAt: block.invokedAt,
-                    steered: block.steered
+                    steered: block.steered,
+                    peer: PeerMessageMetadataSchema.safeParse(
+                        block.meta && typeof block.meta === 'object' && 'peer' in block.meta ? block.meta.peer : undefined
+                    ).data
                 } satisfies HappyChatMessageMetadata
             }
         }

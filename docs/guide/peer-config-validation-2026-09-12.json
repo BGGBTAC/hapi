@@ -1,0 +1,133 @@
+{
+  "validatedAt": "2026-09-12T15:45:19.605610+00:00",
+  "configurationCommittedAt": "2026-09-12T15:37:03.695704+00:00",
+  "configurationOnly": true,
+  "serviceRestarts": 0,
+  "supervisorUnit": "hapi-peer-config-9e7b6156bb854481.service",
+  "supervisorInvocation": "9827c64d92ef4af5ad8f4eb5d2abf835",
+  "originalUnitSha256": "aa1e20c98c0c6273651c0b49a1b61ead0fbf9c8e252f86b90a02adb75b6fc1eb",
+  "unitSha256": "96d213a49a57d89d70c7cfd1108b518f3bb9291acd74046b6bdc7b6cec7e4d48",
+  "change": {
+    "from": "Requires=hapi-hub.service",
+    "to": "Wants=hapi-hub.service"
+  },
+  "killMode": "control-group (unchanged default)",
+  "preservedAtConfigurationCommit": [
+    {
+      "pid": 658982,
+      "generation": "59686561",
+      "exe": "/usr/bin/node"
+    },
+    {
+      "pid": 658990,
+      "generation": "59686563",
+      "exe": "/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi"
+    },
+    {
+      "pid": 659039,
+      "generation": "59687062",
+      "exe": "/usr/bin/node"
+    },
+    {
+      "pid": 659047,
+      "generation": "59687064",
+      "exe": "/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi"
+    },
+    {
+      "pid": 665749,
+      "generation": "60026251",
+      "exe": "/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi"
+    },
+    {
+      "pid": 666334,
+      "generation": "60026434",
+      "exe": "/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi"
+    },
+    {
+      "pid": 685485,
+      "generation": "60624716",
+      "exe": "/usr/lib/node_modules/@twsxtd/hapi/node_modules/@twsxtd/hapi-linux-x64/bin/hapi"
+    }
+  ],
+  "processCheckAfterLiveAcceptance": [
+    {
+      "pid": 658982,
+      "state": "same-generation"
+    },
+    {
+      "pid": 658990,
+      "state": "same-generation"
+    },
+    {
+      "pid": 659039,
+      "state": "same-generation"
+    },
+    {
+      "pid": 659047,
+      "state": "same-generation"
+    },
+    {
+      "pid": 665749,
+      "state": "same-generation"
+    },
+    {
+      "pid": 666334,
+      "state": "same-generation"
+    },
+    {
+      "pid": 685485,
+      "state": "ended-after-configuration-commit"
+    }
+  ],
+  "liveBinarySha256": "7eeb173ace813a63bfcd085604daa0c6d1cd13c9456104e6843920dd8753bac7",
+  "artifactProvenance": "peer-live-provenance.md; all 119 embedded files and runtime prefix byte-identical",
+  "liveTransport": {
+    "kind": "real-hub-and-mcp-transport-check",
+    "modelsInvoked": false,
+    "senderSessionId": "bbde02cf-dd1b-4552-98d2-4734c47a2705",
+    "recipientSessionId": "5901ceb1-7024-4551-8b97-0ee101e7c65a",
+    "messageId": "7271966b-b5e5-4c87-a9f9-6067240e94ca",
+    "authenticatedSender": true,
+    "slashCommandIsolated": true,
+    "deduplicated": true,
+    "boundReply": true,
+    "browserVerified": true
+  },
+  "companionHandoff": {
+    "at": "2026-09-12T15:43:09.264Z",
+    "source": "bbde02cf-dd1b-4552-98d2-4734c47a2705",
+    "target": "5901ceb1-7024-4551-8b97-0ee101e7c65a",
+    "taskId": "2ff35645-bd59-4060-96ea-98676ac3b23f",
+    "handoffId": "f496c417-e078-4295-a3ea-ed0a16513e50",
+    "localId": "companion:d3f383727a3dc7c3fb17562542be3ddbb2478317e36b1b3845891584a33f66c9",
+    "status": "sent",
+    "attempts": 1,
+    "idempotent": true,
+    "concreteCredential": true,
+    "peerCapability": true,
+    "meaning": "Im Hub persistiert; keine Behauptung einer Modellverarbeitung."
+  },
+  "recipientReceipt": {
+    "kind": "companion-message-received",
+    "localId": "peer:bbde02cf-dd1b-4552-98d2-4734c47a2705:companion%3Ad3f383727a3dc7c3fb17562542be3ddbb2478317e36b1b3845891584a33f66c9",
+    "senderSessionId": "bbde02cf-dd1b-4552-98d2-4734c47a2705",
+    "authenticatedSenderMatches": true,
+    "originalTextSha256": "7f633dce818fa02f1bd554b0c64de93e27f25b1cfb3ef2aa084884c2b4c6b271",
+    "originalTextBytes": 636
+  },
+  "limits": [
+    "Transport validation did not invoke models.",
+    "No HAPI database backup or binary replacement was performed.",
+    "Explicit runner restarts still terminate its control group."
+  ],
+  "transportTestCompletion": {
+    "kind": "companion-hold-complete",
+    "additionalReceivedMessages": 1
+  },
+  "testCleanup": {
+    "testTaskCancelled": true,
+    "temporaryTestCredentialRevoked": true,
+    "companionCheckerExitCode": 0,
+    "hubTransportCheckerExitCode": 0
+  }
+}
