@@ -16,7 +16,7 @@ Quelle: Benutzerjournal von `hapi-hub.service` und `hapi-runner.service`, am 12.
 | 12:43:52.224 | Hub wieder gestartet. |
 | 12:43:57.236 | Runner wieder gestartet. |
 
-Die originalen Units haben unveränderte Änderungszeiten vom 06.09.2026. Der Runner hat `Requires=hapi-hub.service`, `After=hapi-hub.service`, `KillMode=control-group`, `Restart=always` und keinen `OnFailure`-Dienst. Der Agent läuft innerhalb der Cgroup `.../app.slice/hapi-runner.service`.
+Bei der Incident-Untersuchung hatten die originalen Units unveränderte Änderungszeiten vom 06.09.2026. Der Runner hatte `Requires=hapi-hub.service`, `After=hapi-hub.service`, den effektiven Standard `KillMode=control-group`, `Restart=always` und keinen `OnFailure`-Dienst. Der Agent lief innerhalb der Cgroup `.../app.slice/hapi-runner.service`.
 
 ## Ursache
 
@@ -38,7 +38,7 @@ Die beendeten Agenten konnten weder weiterarbeiten noch die Wiederherstellung au
 
 ## Sofortige Korrektur
 
-`peer-activate.py --execute` ist vollständig gesperrt. Der Aufruf endet vor Pfadauflösung, Dateischreiben, Signalen oder systemctl-Aufrufen. Ein CLI-Regressionstest ruft `main()` auf und prüft diesen Abbruch samt ausbleibender Seiteneffekte. Die übrigen 16 synthetischen Tests bleiben erhalten. Die Live-Anleitung ist zurückgezogen; Dry-run und isolierte Vorschau bleiben verfügbar. Der HAPI-PR ist wegen des ungelösten Live-Rollouts als Entwurf gekennzeichnet.
+`peer-activate.py --execute` ist vollständig gesperrt. Der Aufruf endet vor Pfadauflösung, Dateischreiben, Signalen oder systemctl-Aufrufen. Ein CLI-Regressionstest ruft `main()` auf und prüft diesen Abbruch samt ausbleibender Seiteneffekte. Die übrigen 16 synthetischen Tests bleiben erhalten. Die alte Live-Anleitung wurde zurückgezogen; Dry-run und isolierte Vorschau bleiben verfügbar. Der HAPI-PR wurde wegen des damals ungelösten Live-Rollouts zunächst als Entwurf gekennzeichnet.
 
 Alle 17 synthetischen Tests bestanden. Eine gezielte lesende Nachprüfung durch Claude Opus5 bestätigte ausschließlich diese Sperre und den tatsächlichen `main()`-Test. Sie gibt den bisherigen Rollout nicht frei: Der gefährliche Ablauf bleibt im Skript unerreichbar vorhanden und ist noch nicht neu entworfen. Lokaler Reviewbeleg: `/tmp/hapi-opus-incident-guard.json`.
 
@@ -46,4 +46,14 @@ Die Incident-Aufarbeitung ändert keine aktiven Units, Abhängigkeiten, Binärpf
 
 ## Voraussetzung für einen künftigen Rollout
 
-Ein neu entwickelter Ablauf benötigt einen unabhängig beaufsichtigten Controller und eine Wiederherstellung außerhalb der betroffenen Dienste und Cgroups. Er muss direkte und transitive Stop-Abhängigkeiten sowie unbekannte Topologien vor jeder Mutation prüfen, Prozessverluste als Fehler behandeln und den vollständigen Ablauf mit isolierten systemd-Testunits belegen. Ein neuer Live-Versuch ist durch die derzeitige Implementierung nicht möglich.
+Ein neu entwickelter Ablauf benötigt einen unabhängig beaufsichtigten Controller und eine Wiederherstellung außerhalb der betroffenen Dienste und Cgroups. Er muss direkte und transitive Stop-Abhängigkeiten sowie unbekannte Topologien vor jeder Mutation prüfen, Prozessverluste als Fehler behandeln und den vollständigen Ablauf mit isolierten systemd-Testunits belegen. Das gesperrte `peer-activate.py` erfüllt diese Voraussetzungen weiterhin nicht.
+
+## Nachtrag: Konfigurationswechsel ohne Neustart
+
+Die erneute lesende [Provenienzprüfung](peer-live-provenance.md) löste die zuvor offene Artefaktfrage: Trotz unterschiedlicher Gesamtprüfsummen enthalten der installierte Wiederherstellungsbuild und das geprüfte Ziel dieselbe native Laufzeit und dieselben 119 eingebetteten Dateiinhalte. Die Abweichung betrifft den BunFS-Einstiegsnamen und daraus folgende Verpackungsmetadaten. Ein weiterer Binärwechsel war deshalb nicht erforderlich.
+
+Mit Bens erneuter Freigabe wurde am **12.09.2026 um 15:37:03 UTC** ausschließlich die Runner-Abhängigkeit `Requires=hapi-hub.service` in `Wants=hapi-hub.service` geändert. Ein eigener systemd-Dienst führte die atomare Dateiänderung und `daemon-reload` aus; sein `ExecStopPost` war außerhalb der HAPI-Cgroups für die Wiederherstellung zuständig. Reale isolierte systemd-Tests hatten zuvor sowohl die ursprüngliche Stop-Kaskade als auch Prozesserhaltung und Wiederherstellung nach SIGKILL des separaten Test-Workers geprüft. Claude Opus5 gab genau diesen Konfigurationswechsel frei.
+
+Der Vorgang endete mit `status: committed`, **null Dienstneustarts und ohne Downtime**. Hub 658982/658990, Runner 659039/659047 und die drei weiteren erfassten HAPI-Prozesse behielten ihre Prozessgenerationen; die Dienststartzeiten blieben bei 12:43:52 beziehungsweise 12:43:57 UTC. Belege und Grenzen stehen im [ausgeführten Konfigurationsablauf](peer-service-config.md).
+
+Das beseitigt die dokumentierte Weitergabe eines Hub-Stops an den Runner. Ein ausdrücklicher späterer Runner-Neustart bleibt mit dem unveränderten `KillMode=control-group` sitzungsbeendend. Die funktionale Live-Abnahme folgte um 15:43:09 UTC: Peer-MCP, Browser-Herkunftslink und die Übergabe vom Zürcher Companion bis zum tatsächlichen Zielklienten bestanden. Diese Transportprüfung rief keine Modelle auf. Der alte Aktivierungspfad bleibt gesperrt; der nicht entstandene Sicherungspunkt des ersten Versuchs wird durch diesen Konfigurationswechsel nicht ersetzt.

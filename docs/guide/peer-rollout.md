@@ -1,4 +1,4 @@
-# Peer-Erweiterung: Vorschau und gesperrter Live-Rollout
+# Peer-Erweiterung: Vorschau und Betriebsstand
 
 Die Erweiterung benötigt den neuen Hub. Der neue CLI-Aufruf stellt zusätzlich die MCP-Werkzeuge, Capability-Erneuerung und bequemes Antworten bereit. Ein reiner Companion-Plugin-Eintrag kann den fehlenden Hub-Endpunkt nicht ersetzen. Bereits laufende alte CLIs erhalten vom neuen Hub sicher eingerahmte Agentennachrichten; ihre eigenen bisherigen `ping_peer`-Aufrufe sind weiterhin menschlich authentifizierte Legacy-Aufrufe ohne gesicherte Agentenherkunft.
 
@@ -54,18 +54,24 @@ HAPI_PEER_BROWSER=1 bun run test src/api/peerMessaging.test.ts
 
 Playwright benötigt einen installierten Chromium. Optional kann `HAPI_PEER_BROWSER_EXECUTABLE` auf eine vorhandene ausführbare Datei zeigen. Geprüft werden Persistenz, Wiederholung ohne Doppelzustellung, gebundene Antwort, abgewiesene Voice-WebSocket-Zugriffe mit Peer-Capability, die Behandlung von `/clear` als Daten sowie der sichtbare Herkunftslink und dessen Navigation.
 
-## 3. Live-Rollout gesperrt
+## 3. Ausgeführter Konfigurationswechsel; alter Aktivierungsweg gesperrt
 
 Der Aktivierungsversuch vom 12.09.2026 verursachte einen mehrstündigen HAPI-Ausfall. Die frühere Anleitung und die Zusage, laufende Sitzungen zu erhalten, waren fehlerhaft. Ursache, Zeitverlauf, fehlender Sicherungspunkt und Sofortkorrektur stehen im [Incidentbericht](peer-incident-2026-09-12.md).
 
 `scripts/dev/peer-activate.py` erlaubt ausschließlich die lesende Vorbereitung. `--execute` wird vor jedem Eingriff abgewiesen. Es gibt keinen freigegebenen Live-Aktivierungsweg in diesem Skript. Insbesondere darf der Hub nicht aus einem abhängigen Runner heraus gestoppt werden: `Requires` und `KillMode=control-group` können dabei auch den Deployer und dessen Recovery beenden.
 
-Die Bau- und Vorschauprüfungen oben bleiben verwendbar. Ein künftiger Wartungsablauf muss Dienstabhängigkeiten und Prozessgruppen vollständig berücksichtigen und einen unabhängig beaufsichtigten Controller sowie eine externe Wiederherstellung besitzen. Die positiven Prüfungen einzelner Hilfsfunktionen ersetzen diesen Nachweis nicht.
+Der separat wiederhergestellte Live-Stand enthält bereits denselben Anwendungscode, dieselbe Laufzeit und alle 119 eingebetteten Dateien des geprüften Releases; die unterschiedlichen Gesamtprüfsummen erklären sich aus der Bun-Verpackung. Den direkten Nachweis enthält die [Provenienzprüfung](peer-live-provenance.md).
+
+Am 12.09.2026 um 15:37:03 UTC wurde daher ausschließlich die Runner-Abhängigkeit `Requires=hapi-hub.service` durch `Wants=hapi-hub.service` ersetzt. Der neue, unabhängig beaufsichtigte [Konfigurationsablauf](peer-service-config.md) endete erfolgreich mit **null Dienstneustarts und ohne Downtime**. Hub, Runner und sämtliche sieben erfassten HAPI-Prozessgenerationen blieben erhalten. Um 15:43:09 UTC bestand auch die zusätzliche funktionale Live-Abnahme von Peer-MCP, Browser-Herkunftslink und Companion-Übergabe bis zum tatsächlichen Zielklienten. Diese Transportprüfung verwendete synthetische Nachrichten und rief keine Modelle auf.
+
+Die Bau- und Vorschauprüfungen oben bleiben verwendbar. Der Konfigurationsablauf ersetzt keine allgemeine Binäraktivierung und macht spätere ausdrückliche Runner-Neustarts nicht sitzungserhaltend. Ein künftiger Wartungsablauf mit Dienstneustarts muss Dienstabhängigkeiten und Prozessgruppen vollständig berücksichtigen und einen unabhängig beaufsichtigten Controller sowie eine externe Wiederherstellung besitzen. Die positiven Prüfungen einzelner Hilfsfunktionen ersetzen diesen Nachweis nicht.
 
 ## 4. Rückkehr zum vorherigen Stand
 
 **Die alte Hub-Version darf nicht gegen eine bereits auf Schema 26 migrierte Datenbank gestartet werden.** Ein Zurücksetzen nur des Binärpfads reicht nicht.
 
-Bei einer gescheiterten Abnahme keine neuen Aufgaben zulassen. Den neuen Hub stoppen, die vor dem Wechsel gesicherte komplette Datengeneration mit dem etablierten verschlüsselten Restore-Verfahren wiederherstellen und den alten Binärpfad/Unit-Stand aktivieren. Erst anschließend den alten Hub starten und seine Gesundheit/Sitzungsübersicht prüfen. Die fehlgeschlagene neue Datengeneration für eine spätere Untersuchung geschützt aufbewahren; niemals ungeprüft einzelne Tabellen zwischen den Ständen mischen.
+Der erste fehlgeschlagene Aktivierungsversuch erzeugte keinen Sicherungspunkt. Diese Anleitung bietet deshalb kein ausführbares Verfahren zur Rückkehr auf die frühere Datengeneration. Der abgeschlossene Konfigurationswechsel ändert weder Binärdatei noch Datenbankschema; seine konkrete Wiederherstellung betrifft ausschließlich die gesicherte Original-Unit und `daemon-reload` im unabhängigen Controller.
+
+Ein späterer Versionsrollback muss vor jedem Eingriff einen tatsächlich vorhandenen, geprüften Sicherungsstand und die unabhängige Steuerung aller nötigen Dienstübergänge nachweisen. Eine vollständige Datengeneration wird ausschließlich mit dem etablierten verschlüsselten Restore-Verfahren wiederhergestellt; Tabellen zwischen den Ständen dürfen nicht ungeprüft gemischt werden. Die gescheiterte neue Generation ist für eine spätere Untersuchung geschützt aufzubewahren.
 
 Nach einer erfolgreichen Freigabe entstehende neue Nachrichten sind im alten Sicherungspunkt nicht enthalten. Ein später Rollback benötigt deshalb einen gesonderten Plan für diese Daten oder einen Vorwärtsfix. Das ist der Grund für einen Testhub und eine Abnahme vor Wiederaufnahme produktiver Arbeit.

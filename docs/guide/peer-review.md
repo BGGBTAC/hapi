@@ -2,6 +2,8 @@
 
 **Incident-Nachtrag:** Der Live-Rollout vom 12.09.2026 scheiterte durch eine übersehene systemd-Abhängigkeit und beendete den Deployer selbst. Die nachstehende historische Betriebsfreigabe ist widerlegt. `--execute` ist gesperrt; [Ursache und Korrekturen](peer-incident-2026-09-12.md). Die Code-/Transporttests sind kein Nachweis für einen sicheren Dienstwechsel.
 
+**Abschluss:** Der separat geprüfte Konfigurationswechsel wurde um 15:37 UTC ohne Dienstneustart ausgeführt, die Live-MCP-/Browser-/Companion-Abnahme bestand um 15:43 UTC. Der vorhandene Anwendungscode entspricht bereits byteweise dem geprüften Build. [Ablauf, tatsächliches Opus5-Review und Nachweise](peer-service-config.md), [maschinenlesbarer Abschluss](peer-config-validation-2026-09-12.json). Die Freigabe gilt ausschließlich für diese Konfigurationsänderung, nicht für den weiterhin gesperrten alten Aktivierungsweg.
+
 Stand: 12.09.2026, Basis HAPI v0.29.0. Claude Opus prüfte Architektur und Implementierung lesend; die automatisierten Tests wurden separat ausgeführt. Die abschließende Code-Nachprüfung schloss alle zehn Ursprungsbefunde und fand keinen Blocker.
 
 | Opus-Befund | Erledigung und Beleg |
