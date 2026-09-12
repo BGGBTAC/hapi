@@ -22,13 +22,15 @@ Der Konfigurationswechsel wurde um **15:37:03 UTC erfolgreich abgeschlossen, ohn
 
 Die privaten lokalen Belege liegen unter `~/.local/state/hapi-peer-config/9e7b6156bb854481/`: `committed.json` enthält `configOnly: true`, `serviceRestarts: 0` und alle sieben erhaltenen Prozessgenerationen; `result.json` bestätigt den Abschluss des beaufsichtigten Vorgangs. Die ausgeführte Applier-Kopie hat SHA256 `6a9a0a71c3d9bbc52dd54f6d82214d5fff61fbd1ae005ce8cae1e03816ed2819`.
 
+Die sieben erhaltenen Generationen beziehen sich auf den Konfigurationswechsel. Bei der späteren Kontrolle nach der Live-Abnahme waren sechs einschließlich Hub und Runner weiterhin unverändert; der zusätzliche HAPI-Prozess 685485 war inzwischen beendet. Beide Zeitpunkte stehen getrennt im JSON-Beleg.
+
 Es wurde keine Binärdatei ersetzt und kein Datenbankbackup angelegt.
 
 ## Funktionale Live-Abnahme
 
 Die zusätzliche Live-Abnahme war am **12.09.2026 um 15:43:09 UTC erfolgreich**. Zwei neu angelegte Testsitzungen und zwei echte MCP-Server prüften gegen den laufenden Hub authentifizierte Herkunft, `/clear` als eingerahmte Nachrichtendaten, genau eine Zustellung bei Wiederholung und eine an den Absender gebundene Antwort. Playwright bestätigte den sichtbaren Herkunftslink und die Navigation zur Sendersitzung. Die Prüfung verwendete ausschließlich synthetische Testnachrichten; sie rief keine Modelle auf.
 
-Auch die Übergabe vom Zürcher Companion erreichte den tatsächlichen Zielklienten. Handoff `f496c417-e078-4295-a3ea-ed0a16513e50` wurde im ersten Versuch zugestellt; eine Wiederholung blieb idempotent. Der Empfangscallback bestätigte dieselbe lokale Nachrichten-ID und die authentifizierte Quellsitzung `bbde02cf-dd1b-4552-98d2-4734c47a2705`; Ziel war `5901ceb1-7024-4551-8b97-0ee101e7c65a`. Maschinenlesbare Belege stehen in [peer-config-validation-2026-09-12.json](peer-config-validation-2026-09-12.json).
+Auch die Übergabe vom Zürcher Companion erreichte den tatsächlichen Zielklienten. Handoff `f496c417-e078-4295-a3ea-ed0a16513e50` wurde im ersten Versuch zugestellt; eine Wiederholung blieb idempotent. Der Empfangscallback bestätigte die passende, durch den Hub eingerahmte Local-ID und die authentifizierte Quellsitzung `bbde02cf-dd1b-4552-98d2-4734c47a2705`; Ziel war `5901ceb1-7024-4551-8b97-0ee101e7c65a`. Maschinenlesbare Belege stehen in [peer-config-validation-2026-09-12.json](peer-config-validation-2026-09-12.json).
 
 ## Ablauf
 
