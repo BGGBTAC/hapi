@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Activate a reviewed peer release on the authorized dev-main user services.
 
-Default is read-only preparation. --execute performs the explicitly requested rollout.
+Default is read-only preparation. Live activation is disabled after the 2026-09-12 outage.
 No SQLite access, plaintext secret output, global npm replacement, or automatic downgrade.
 """
 import argparse
@@ -467,6 +467,12 @@ def main() -> None:
     parser.add_argument('--create-path-shim', action='store_true')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
+    # A Hub stop propagates through the Runner's Requires dependency. When this
+    # process belongs to that Runner's cgroup, systemd also terminates the deployer
+    # before its exception handler can recover either service. Do not re-enable
+    # this path without independent supervision and dependency-aware validation.
+    if args.execute:
+        parser.error('Live activation disabled after the 2026-09-12 outage; this script is read-only. See docs/guide/peer-incident-2026-09-12.md.')
     if socket.gethostname() != 'dev-main' or os.getuid() == 0:
         parser.error('This rollout is restricted to the existing non-root dev-main user service owner')
     if args.backup_timeout <= 0 or args.health_timeout <= 0:

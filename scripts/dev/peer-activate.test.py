@@ -1,9 +1,11 @@
 """Synthetic regression tests; no existing HAPI state or services are touched."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -21,6 +23,24 @@ def envelope(recipient=RECIPIENT, **metadata):
 
 
 class ActivationTests(unittest.TestCase):
+    def test_live_cli_rejected_before_process_or_filesystem_access(self):
+        arguments = ['peer-activate.py', '--execute', '--binary', '/synthetic/binary',
+            '--infra-root', '/synthetic/infra', '--sops', '/synthetic/sops',
+            '--expected-age-recipient', RECIPIENT, '--url', 'http://127.0.0.1:3006']
+        with patch.object(sys, 'argv', arguments), patch.object(sys, 'stderr', new_callable=io.StringIO) as errors, \
+             patch.object(activate, 'run') as command, patch.object(activate.os, 'kill') as signal, \
+             patch.object(activate.Path, 'resolve') as resolve, \
+             patch.object(activate.Path, 'mkdir') as mkdir, patch.object(activate.Path, 'write_text') as write, \
+             patch.object(activate.shutil, 'copy2') as copy, \
+             patch.object(activate.subprocess, 'run') as subprocess_run, \
+             patch.object(activate.subprocess, 'Popen') as subprocess_start:
+            with self.assertRaises(SystemExit) as stopped:
+                activate.main()
+            self.assertEqual(stopped.exception.code, 2)
+            self.assertIn('Live activation disabled', errors.getvalue())
+        for action in [command, signal, resolve, mkdir, write, copy, subprocess_run, subprocess_start]:
+            action.assert_not_called()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='hapi-peer-activate-synthetic-')
         self.addCleanup(self.temporary.cleanup)

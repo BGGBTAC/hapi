@@ -1,5 +1,7 @@
 # Peer-Erweiterung: Review und Prüfnachweise
 
+**Incident-Nachtrag:** Der Live-Rollout vom 12.09.2026 scheiterte durch eine übersehene systemd-Abhängigkeit und beendete den Deployer selbst. Die nachstehende historische Betriebsfreigabe ist widerlegt. `--execute` ist gesperrt; [Ursache und Korrekturen](peer-incident-2026-09-12.md). Die Code-/Transporttests sind kein Nachweis für einen sicheren Dienstwechsel.
+
 Stand: 12.09.2026, Basis HAPI v0.29.0. Claude Opus prüfte Architektur und Implementierung lesend; die automatisierten Tests wurden separat ausgeführt. Die abschließende Code-Nachprüfung schloss alle zehn Ursprungsbefunde und fand keinen Blocker.
 
 | Opus-Befund | Erledigung und Beleg |
@@ -39,4 +41,4 @@ Der Betriebsreview stellte fest, dass ein unveränderter alter Runner normale We
 
 Der ergänzende Opus-Betriebsreview verlangte drei Korrekturen: zuverlässige Runner-Wiederherstellung im Fehlerpfad, eine begrenzte Tar/SOPS-Pipeline ohne blockierende Diagnose-Pipe und den exakten Abgleich mit dem erwarteten öffentlichen age-Empfänger. Das Aktivierungsskript enthält diese Korrekturen sowie Unit-/FD-/Portprüfung, Freiplatz- und Archiv-Mitgliedsbelege, natürliche Prozessenden als eigenen Zustand, stabile Runner-PID und ausdrücklich optionale PATH-Umschaltung. `scripts/dev/peer-activate.test.py` prüft 16 synthetische Fehler-/Erfolgspfade; zusätzlich wurde die echte SOPS-Binärdatei mit der Infra-Regel ausschließlich auf synthetische Tar-Daten angewandt.
 
-Die finale Opus-Delta-Prüfung schloss alle drei Betriebsblocker sowie die relevanten Major-/Medium- und Recovery-Befunde. Zwei verbleibende kleine Hinweise wurden direkt korrigiert: ein natürliches Prozessende zwischen Markerprüfungen verhindert nicht mehr die Übernahme der übrigen Sitzungen (zusätzlicher Regressionstest), und Tar toleriert während des Archivierens entfernte temporäre Dateien. Der Stand hatte danach keinen offenen Aktivierungsblocker.
+Die finale Opus-Delta-Prüfung schloss alle drei Betriebsblocker sowie die relevanten Major-/Medium- und Recovery-Befunde. Zwei verbleibende kleine Hinweise wurden direkt korrigiert: ein natürliches Prozessende zwischen Markerprüfungen verhindert nicht mehr die Übernahme der übrigen Sitzungen (zusätzlicher Regressionstest), und Tar toleriert während des Archivierens entfernte temporäre Dateien. Die damalige Bewertung lautete „kein offener Aktivierungsblocker“. Der anschließende Ausfall widerlegte diese Bewertung: Requires-Stop-Propagation, Deployer-Cgroup und Prozessverlust wurden nicht ausreichend geprüft. Nach dem Incident prüft ein zusätzlicher CLI-Test die vollständige Ausführungssperre vor Seiteneffekten (insgesamt 17 synthetische Tests).
