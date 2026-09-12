@@ -40,6 +40,8 @@ Die beendeten Agenten konnten weder weiterarbeiten noch die Wiederherstellung au
 
 `peer-activate.py --execute` ist vollständig gesperrt. Der Aufruf endet vor Pfadauflösung, Dateischreiben, Signalen oder systemctl-Aufrufen. Ein CLI-Regressionstest ruft `main()` auf und prüft diesen Abbruch samt ausbleibender Seiteneffekte. Die übrigen 16 synthetischen Tests bleiben erhalten. Die Live-Anleitung ist zurückgezogen; Dry-run und isolierte Vorschau bleiben verfügbar. Der HAPI-PR ist wegen des ungelösten Live-Rollouts als Entwurf gekennzeichnet.
 
+Alle 17 synthetischen Tests bestanden. Eine gezielte lesende Nachprüfung durch Claude Opus5 bestätigte ausschließlich diese Sperre und den tatsächlichen `main()`-Test. Sie gibt den bisherigen Rollout nicht frei: Der gefährliche Ablauf bleibt im Skript unerreichbar vorhanden und ist noch nicht neu entworfen. Lokaler Reviewbeleg: `/tmp/hapi-opus-incident-guard.json`.
+
 Die Incident-Aufarbeitung ändert keine aktiven Units, Abhängigkeiten, Binärpfade oder Datenbanken und startet keine Dienste neu. Beim Kontrollabruf liefen Hub und Runner; der Hub meldete `peerMessages: true`. Die laufende Binärdatei hat SHA256 `7eeb173ace813a63bfcd085604daa0c6d1cd13c9456104e6843920dd8753bac7`; sie stimmt nicht mit dem ursprünglich vorgesehenen Artefakt `1dabdaa2fbd391820b42cf6c512ca07033ecb8499acce9f11beffea1e5061d7b` überein. Daraus wird keine vollständige Abnahme des aktuellen Releases abgeleitet.
 
 ## Voraussetzung für einen künftigen Rollout
