@@ -54,6 +54,7 @@ export const OpencodeClearOperationSchema = z.object({
 export type OpencodeClearOperation = z.infer<typeof OpencodeClearOperationSchema>
 
 const SessionCapabilitiesSchema = z.object({
+    concurrentClients: z.boolean().optional(),
     terminal: z.boolean().optional(),
     conversationHistory: ConversationHistoryCapabilitiesSchema.optional()
 })
@@ -185,6 +186,8 @@ export type Metadata = z.infer<typeof MetadataSchema>
 
 export const AgentStateRequestSchema = z.object({
     tool: z.string(),
+    // Correlation only; replies use the request map key, never this tool id.
+    toolCallId: z.string().optional(),
     arguments: z.unknown(),
     createdAt: z.number().nullish()
 })
@@ -193,10 +196,11 @@ export type AgentStateRequest = z.infer<typeof AgentStateRequestSchema>
 
 export const AgentStateCompletedRequestSchema = z.object({
     tool: z.string(),
+    toolCallId: z.string().optional(),
     arguments: z.unknown(),
     createdAt: z.number().nullish(),
     completedAt: z.number().nullish(),
-    status: z.enum(['canceled', 'denied', 'approved']),
+    status: z.enum(['canceled', 'denied', 'approved', 'resolved']),
     reason: z.string().optional(),
     mode: z.string().optional(),
     decision: z.enum(['approved', 'approved_for_session', 'denied', 'abort']).optional(),
@@ -213,6 +217,8 @@ export type AgentStateCompletedRequest = z.infer<typeof AgentStateCompletedReque
 
 export const AgentStateSchema = z.object({
     controlledByUser: z.boolean().nullish(),
+    // Current actionable shared Codex proposal; content remains in the transcript.
+    codexPlanProposalId: z.string().nullish(),
     // True while the CLI is delivering a queued message into the active turn
     // (Steer). Surfaced so the web can reflect the inject in progress.
     steeringActive: z.boolean().nullish(),
@@ -329,6 +335,7 @@ export const DecryptedMessageSchema = z.object({
 export type DecryptedMessage = z.infer<typeof DecryptedMessageSchema>
 
 export const SessionSchema = z.object({
+    hasConversationContent: z.boolean().optional(),
     id: z.string(),
     namespace: z.string(),
     seq: z.number(),
@@ -489,6 +496,7 @@ export const RunnerStateSchema = z.object({
     httpPort: z.number().optional(),
     startedAt: z.number().optional(),
     capabilities: z.object({
+        codexSharedRuntime: z.literal(true).optional(),
         piExistingSessionResume: z.literal(true).optional(),
         agentConfigs: z.array(AgentConfigDescriptorSchema).optional()
     }).optional(),
@@ -577,7 +585,9 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
         message: DecryptedMessageSchema
     }),
     SessionChangedSchema.extend({
-        type: z.literal('messages-invalidated')
+        type: z.literal('messages-invalidated'),
+        reason: z.literal('rewind').optional(),
+        truncateFromLocalId: z.string().min(1).optional()
     }),
     SessionChangedSchema.extend({
         type: z.literal('scheduled-matured')
@@ -589,6 +599,14 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
     MachineChangedSchema.extend({
         type: z.literal('machine-updated'),
         data: MachineUpdatedDataSchema.optional()
+    }),
+    /**
+     * The machine re-checked `agy models` in the background and the listing
+     * changed. Carries no catalog: clients refetch the machine's agy-models
+     * route, which answers from the machine's cache.
+     */
+    MachineChangedSchema.extend({
+        type: z.literal('machine-agy-models-updated')
     }),
     SessionEventBaseSchema.extend({
         type: z.literal('toast'),

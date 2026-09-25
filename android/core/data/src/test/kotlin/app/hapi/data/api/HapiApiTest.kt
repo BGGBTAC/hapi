@@ -2,7 +2,6 @@ package app.hapi.data.api
 
 import app.hapi.data.HubSession
 import app.hapi.data.auth.HubCredentials
-import app.hapi.data.auth.HubUrls
 import app.hapi.data.auth.InMemoryCredentialStore
 import app.hapi.data.fakeJwt
 import app.hapi.protocol.wire.ApprovePermissionRequest
@@ -26,6 +25,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.Buffer
@@ -41,10 +41,10 @@ class HapiApiTest {
     fun setUp() {
         server = MockWebServer()
         server.start()
-        val hubUrl = HubUrls.normalize(server.url("/").toString())!!
+        val hubUrl = server.url("/").toString().removeSuffix("/")
         val store = InMemoryCredentialStore()
         store.set(HubCredentials(hubUrl = hubUrl, accessToken = "token", jwt = jwt))
-        session = HubSession(hubUrl, store)
+        session = HubSession(server.url("/"), store)
     }
 
     @AfterTest
@@ -58,6 +58,16 @@ class HapiApiTest {
         .setBody(body)
 
     private fun lastRequestBody() = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+
+    @Test
+    fun `production clients reject cleartext hub urls`() {
+        assertFailsWith<IllegalArgumentException> {
+            HapiApi("http://hub.example", OkHttpClient())
+        }
+        assertFailsWith<IllegalArgumentException> {
+            HubSession("http://hub.example", InMemoryCredentialStore())
+        }
+    }
 
     // ------------------------------------------------------------ ApiError --
 
@@ -106,6 +116,26 @@ class HapiApiTest {
     }
 
     // ------------------------------------------------------ request shapes --
+
+    @Test fun `Codex implementation uses a dedicated endpoint and exact plan id`() = runBlocking {
+        server.enqueue(ok("""{"ok":true}"""))
+        session.api.implementCodexPlan("session/1", "plan:thread:turn:item")
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/sessions/session%2F1/codex/plan/implement", request.path)
+        assertEquals("Bearer $jwt", request.getHeader("Authorization"))
+        assertEquals("""{"planId":"plan:thread:turn:item"}""", request.body.readUtf8())
+    }
+
+    @Test fun `uncertain plan implementation reports its error without automatic resubmission`() = runBlocking {
+        for ((status, code) in listOf(409 to "stale_plan", 409 to "unavailable", 502 to "failed", 503 to "indeterminate")) {
+            server.enqueue(MockResponse().setResponseCode(status).setBody("""{"ok":false,"code":"$code","error":"Not confirmed"}"""))
+            val error = assertFailsWith<ApiError> { session.api.implementCodexPlan("session", "proposal") }
+            assertEquals(status, error.status)
+            assertEquals(code, error.code)
+        }
+        assertEquals(4, server.requestCount)
+    }
 
     @Test
     fun `messages page sends compound cursor and epoch as query params`() {
@@ -318,6 +348,21 @@ class HapiApiTest {
         assertEquals("DELETE", request.method)
         assertEquals("/api/devices/register", request.path)
         assertEquals("fcm-token", Json.parseToJsonElement(request.body.readUtf8()).jsonObject.getValue("token").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `register device sends the persisted encryption key along with the install id`() {
+        server.enqueue(ok("""{"ok":true}"""))
+        val key = java.util.Base64.getEncoder().encodeToString(ByteArray(32))
+        runBlocking { session.api.registerDevice(token = "FCM:MixedCase", deviceId = "install", pushKey = key) }
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/devices/register", request.path)
+        val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("FCM:MixedCase", body.getValue("token").jsonPrimitive.content)
+        assertEquals("phone", body.getValue("platform").jsonPrimitive.content)
+        assertEquals("install", body.getValue("deviceId").jsonPrimitive.content)
+        assertEquals(key, body.getValue("pushKey").jsonPrimitive.content)
     }
 
     // --------------------------------------------------- health & binaries --
