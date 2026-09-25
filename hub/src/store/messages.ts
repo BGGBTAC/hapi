@@ -7,6 +7,9 @@ import { getLiveReasoningStreamId } from '@hapi/protocol/messages'
 
 import type { StoredMessage } from './types'
 import { decodeMessageContent, encodeMessageContent, truncateOversizedMessageContent } from './contentCodec'
+import { isObject } from '@hapi/protocol'
+import type { PeerMessageMetadata } from '@hapi/protocol/schemas'
+import { externalLocalId, PeerMessageConflictError, stripPeerMetadata } from './peerMetadata'
 
 type DbMessageRow = {
     id: string
@@ -19,6 +22,7 @@ type DbMessageRow = {
     invoked_at: number | null
     scheduled_at: number | null
     delivery_state: string | null
+    peer_authenticated: number
 }
 
 export type MessagePosition = {
@@ -42,6 +46,8 @@ export function addImportedMessage(
     localId: string,
     createdAt: number
 ): { message: StoredMessage; inserted: boolean } {
+    content = stripPeerMetadata(content)
+    localId = externalLocalId(localId)
     const existing = db.prepare(
         'SELECT * FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1'
     ).get(sessionId, localId) as DbMessageRow | undefined
@@ -86,7 +92,7 @@ function toStoredMessage(row: DbMessageRow): StoredMessage {
     return {
         id: row.id,
         sessionId: row.session_id,
-        content: decodeMessageContent(row.content),
+        content: row.peer_authenticated === 1 ? decodeMessageContent(row.content) : stripPeerMetadata(decodeMessageContent(row.content)),
         createdAt: row.created_at,
         seq: row.seq,
         localId: row.local_id,
@@ -101,14 +107,25 @@ export type CopyStoredMessageInput = Pick<
     'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'deliveryState'
 >
 
+export function getMessageById(db: Database, sessionId: string, messageId: string): StoredMessage | null {
+    const row = db.prepare('SELECT * FROM messages WHERE session_id = ? AND id = ?').get(sessionId, messageId) as DbMessageRow | undefined
+    return row ? toStoredMessage(row) : null
+}
+
 export function addMessage(
     db: Database,
     sessionId: string,
     content: unknown,
     localId?: string,
     scheduledAt?: number | null,
-    createdAt?: number
+    createdAt?: number,
+    trustedPeer?: PeerMessageMetadata
 ): StoredMessage {
+    content = stripPeerMetadata(content)
+    if (localId && !trustedPeer) localId = externalLocalId(localId)
+    if (trustedPeer && isObject(content)) {
+        content = { ...content, meta: { ...(isObject(content.meta) ? content.meta : {}), peer: trustedPeer } }
+    }
     const now = Date.now()
     // Client-provided origin timestamp (e.g. a Claude transcript entry's own
     // `timestamp`), falling back to server-receive time when absent. Only
@@ -131,7 +148,22 @@ export function addMessage(
             'SELECT * FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1'
         ).get(sessionId, localId) as DbMessageRow | undefined
         if (existing) {
-            return toStoredMessage(existing)
+            const stored = toStoredMessage(existing)
+            if (trustedPeer) {
+                const previous = isObject(stored.content) ? stored.content : {}
+                const previousMeta = isObject(previous.meta) ? previous.meta : {}
+                const peer = isObject(previousMeta.peer) ? previousMeta.peer : {}
+                const body = isObject(content) && isObject(content.content) ? content.content : {}
+                const previousBody = isObject(previous.content) ? previous.content : {}
+                const previousText = typeof peer.originalText === 'string' ? peer.originalText : previousBody.text
+                const incomingText = trustedPeer.originalText ?? body.text
+                if (previousBody.type !== 'text' || previousText !== incomingText
+                    || peer.senderSessionId !== trustedPeer.senderSessionId
+                    || peer.replyTo !== trustedPeer.replyTo) {
+                    throw new PeerMessageConflictError()
+                }
+            }
+            return stored
         }
     }
 
@@ -155,9 +187,9 @@ export function addMessage(
         const previousHead = getNewestMessagePosition(db, sessionId)
         db.prepare(`
             INSERT INTO messages (
-                id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at
+                id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at, peer_authenticated
             ) VALUES (
-                @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at
+                @id, @session_id, @content, @created_at, @seq, @local_id, @invoked_at, @scheduled_at, @peer_authenticated
             )
         `).run({
             id,
@@ -167,7 +199,8 @@ export function addMessage(
             seq: msgSeq,
             local_id: localId ?? null,
             invoked_at: invokedAt,
-            scheduled_at: scheduledAt ?? null
+            scheduled_at: scheduledAt ?? null,
+            peer_authenticated: trustedPeer ? 1 : 0
         })
 
         const positionAt = invokedAt ?? stampedAt
@@ -202,7 +235,7 @@ export function copyMessageToSession(
     const createdAt = Number.isFinite(message.createdAt) ? message.createdAt : Date.now()
     const nextSeq = getMaxSeq(db, sessionId) + 1
 
-    let localId = message.localId
+    let localId = message.localId ? externalLocalId(message.localId) : message.localId
     if (localId) {
         const collision = db.prepare(
             'SELECT 1 FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1'
@@ -231,7 +264,7 @@ export function copyMessageToSession(
         session_id: sessionId,
         // Lossless re-encode only — copies move existing history between
         // sessions, so no truncation here even for pre-codec oversized rows.
-        content: encodeMessageContent(message.content),
+        content: encodeMessageContent(stripPeerMetadata(message.content)),
         created_at: createdAt,
         seq: nextSeq,
         local_id: localId ?? null,
@@ -278,7 +311,7 @@ export function copyMessagesToSession(
 
         for (const message of messages) {
             const createdAt = Number.isFinite(message.createdAt) ? message.createdAt : Date.now()
-            let localId = message.localId
+            let localId = message.localId ? externalLocalId(message.localId) : message.localId
             if (localId) {
                 const collision = collisionCheck.get(sessionId, localId) as { 1: number } | undefined
                 if (collision) {
@@ -292,7 +325,7 @@ export function copyMessagesToSession(
             insert.run({
                 id: randomUUID(),
                 session_id: sessionId,
-                content: encodeMessageContent(message.content),
+                content: encodeMessageContent(stripPeerMetadata(message.content)),
                 created_at: createdAt,
                 seq: nextSeq,
                 local_id: localId ?? null,
@@ -941,8 +974,8 @@ export function markMessagesIndeterminate(
     return setMessagesDeliveryState(db, sessionId, localIds, 'indeterminate')
 }
 
-/** Settle immediate queued rows on an archived clear source without touching
- * scheduled rows, which must remain uninvoked for transfer to the replacement. */
+/** Settle ordinary immediate queued rows on an archived clear source without touching
+ * scheduled or authenticated peer rows, which must remain uninvoked for replay. */
 export function markUninvokedImmediateMessages(
     db: Database,
     sessionId: string,
@@ -951,6 +984,7 @@ export function markUninvokedImmediateMessages(
     const rows = db.prepare(`
         SELECT local_id FROM messages
         WHERE session_id = ?
+          AND peer_authenticated = 0
           AND local_id IS NOT NULL
           AND scheduled_at IS NULL
           AND invoked_at IS NULL
@@ -963,6 +997,7 @@ export function markUninvokedImmediateMessages(
         UPDATE messages
         SET invoked_at = ?
         WHERE session_id = ?
+          AND peer_authenticated = 0
           AND local_id IS NOT NULL
           AND scheduled_at IS NULL
           AND invoked_at IS NULL
@@ -1162,14 +1197,14 @@ export function truncateMessagesFromLocalId(
             const id = randomUUID()
             const createdAt = message.createdAt ?? now
             const invokedAt = message.invokedAt === undefined ? createdAt : message.invokedAt
-            const rowLocalId = message.localId ?? null
+            const rowLocalId = message.localId ? externalLocalId(message.localId) : null
             db.prepare(`
                 INSERT INTO messages (id, session_id, content, created_at, seq, local_id, invoked_at, scheduled_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
             `).run(
                 id,
                 sessionId,
-                encodeMessageContent(message.content),
+                encodeMessageContent(stripPeerMetadata(message.content)),
                 createdAt,
                 msgSeqRow.nextSeq,
                 rowLocalId,

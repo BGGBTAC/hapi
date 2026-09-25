@@ -1,11 +1,4 @@
 export default {
-  'codexUsage.title': 'Codex 用量',
-  'codexUsage.ordinary': '常规用量',
-  'codexUsage.unknown': '未知',
-  'codexUsage.remaining': '剩余 {percent}%',
-  'codexUsage.window': '{minutes} 分钟窗口',
-  'codexUsage.resets': '重置时间 {time}',
-
   // Loading states
   'loading': '加载中…',
   'authorizing': '认证中…',
@@ -567,6 +560,8 @@ export default {
   'tool.rejected': '已拒绝',
   'tool.cancel': '取消',
   'tool.exitPlan': '退出计划模式',
+  'tool.plan.implement': '执行计划',
+  'tool.plan.continue': '继续规划',
   'tool.patch': '补丁',
   'tool.input': '输入',
   'tool.trace': '追踪',
@@ -606,6 +601,8 @@ export default {
   'tool.requestUserInput.textPlaceholder': '输入您的答案…',
   'tool.requestUserInput.noteLabel': '补充说明（可选）',
   'tool.requestUserInput.notePlaceholder': '添加备注…',
+  'tool.requestUserInput.otherLabel': '以上都不是',
+  'tool.requestUserInput.otherDescription': '可在备注中补充说明（可选）。',
   'tool.requestUserInput.popupBlocked': '无法打开登录页面。请允许弹出窗口后重试。',
   'toolGroup.title': '工具活动',
   'toolGroup.friendly.inspectTarget': '检查 {target}',
@@ -668,6 +665,7 @@ export default {
   'composer.scheduleErrorTooFar': '最多只能定时 7 天。',
   'queuedMessages.scheduledFor': '定时发送: {time}',
   'queuedMessages.editAlreadyInvoked': '消息已发送，无法编辑',
+  'queuedMessages.editBusyNotRestored': '发送结果仍未确认，未恢复草稿（消息可能仍在发送中）',
   'queuedMessages.editCurrentDraftKept': '队列消息已取消，已保留当前草稿和定时设置。',
   'queuedMessages.steer': '立即插入当前回合',
   'queuedMessages.steerFailed': '插入失败，消息仍在队列中',
@@ -760,6 +758,7 @@ export default {
   'toast.ready.title': '等待输入',
   'toast.ready.body': '{agent} 正在 {session} 等待你的输入',
   'toast.permission.title': '权限请求',
+  'toast.input.title': '{agent} 需要你回答',
   'toast.task.completed': '任务完成',
   'toast.task.failed': '任务失败',
 

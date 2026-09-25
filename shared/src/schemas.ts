@@ -1,4 +1,23 @@
 import { z } from 'zod'
+
+/** Reserved hub-authenticated provenance; external message writers may not set this. */
+export const PeerMessageMetadataSchema = z.object({
+    senderSessionId: z.string().min(1).max(200),
+    senderName: z.string().max(500).optional(),
+    senderFlavor: z.string().max(100).optional(),
+    originalText: z.string().max(100_000).optional(),
+    replyToSessionId: z.string().min(1).max(200).optional(),
+    replyTo: z.string().min(1).max(200).optional()
+}).strict()
+export type PeerMessageMetadata = z.infer<typeof PeerMessageMetadataSchema>
+
+export const SendPeerMessageRequestSchema = z.object({
+    recipientSessionId: z.string().min(1).max(200),
+    text: z.string().min(1).max(100_000),
+    localId: z.string().min(1).max(200),
+    replyTo: z.string().min(1).max(200).optional()
+}).strict()
+export type SendPeerMessageRequest = z.infer<typeof SendPeerMessageRequestSchema>
 import { COPILOT_AGENT_MODES, type CopilotAgentMode } from './copilotModes'
 import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
 import { AgentConfigDescriptorSchema } from './agentConfig'
@@ -196,23 +215,10 @@ export const AgentStateCompletedRequestSchema = z.object({
 
 export type AgentStateCompletedRequest = z.infer<typeof AgentStateCompletedRequestSchema>
 
-const CodexUsageWindowSchema = z.object({
-    remainingPercent: z.number().min(0).max(100).nullable(),
-    windowDurationMins: z.number().positive().nullable(),
-    resetsAt: z.number().nonnegative().nullable()
-})
-
-const CodexUsageBucketSchema = z.object({
-    primary: CodexUsageWindowSchema.nullable(),
-    secondary: CodexUsageWindowSchema.nullable()
-})
-
 export const AgentStateSchema = z.object({
-    codexUsage: z.object({
-        ordinary: CodexUsageBucketSchema,
-        reserve: CodexUsageBucketSchema.nullable()
-    }).nullish(),
     controlledByUser: z.boolean().nullish(),
+    // Current actionable shared Codex proposal; content remains in the transcript.
+    codexPlanProposalId: z.string().nullish(),
     // True while the CLI is delivering a queued message into the active turn
     // (Steer). Surfaced so the web can reflect the inject in progress.
     steeringActive: z.boolean().nullish(),

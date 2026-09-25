@@ -26,7 +26,7 @@ import {
     PING_PEER_TOOL_DESCRIPTION,
     SESSION_ID_PREFIX_PARAM_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation'
-import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer } from "@/modules/pingPeer/pingPeer";
+import { PeerCapabilityCache, PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer } from "@/modules/pingPeer/pingPeer";
 
 type StartHappyServerOptions = {
     emitTitleSummary?: boolean;
@@ -84,6 +84,7 @@ function createHapiMcpServer(
         name: "HAPI MCP",
         version: "1.0.0",
     });
+    const peerCapabilities = new PeerCapabilityCache();
 
     const changeTitleInputSchema: z.ZodTypeAny = z.object({
         title: z.string().describe('The new title for the chat session'),
@@ -111,6 +112,8 @@ function createHapiMcpServer(
     const pingPeerInputSchema: z.ZodTypeAny = z.object({
         sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
         message: z.string().min(1).describe('Message text to deliver to the target session'),
+        localId: z.string().min(1).max(200).optional().describe('Stable request key: reuse for retries of the same message; different content with the same key is rejected'),
+        replyTo: z.string().min(1).max(200).optional().describe('Hub messageId of a peer message received in this session from the target'),
     });
 
     const maxInlineMediaBytes = 25 * 1024 * 1024;
@@ -295,18 +298,22 @@ function createHapiMcpServer(
         description: PING_PEER_TOOL_DESCRIPTION,
         title: 'Ping Peer Session',
         inputSchema: pingPeerInputSchema,
-    }, async (args: { sessionIdPrefix: string; message: string }) => {
+    }, async (args: { sessionIdPrefix: string; message: string; localId?: string; replyTo?: string }) => {
         logger.debug('[hapiMCP] ping_peer:', args.sessionIdPrefix);
         try {
             const result = await pingPeer({
                 sessionIdPrefix: args.sessionIdPrefix,
                 message: args.message,
+                senderSessionId: client.sessionId,
+                localId: args.localId,
+                replyTo: args.replyTo,
+                peerCapabilities,
             });
             return {
                 content: [
                     {
                         type: 'text' as const,
-                        text: `Delivered to ${result.sessionId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
+                        text: `Persisted for ${result.sessionId}${result.resumed ? ' (resumed)' : ''} (${result.name}). messageId=${result.messageId}; localId=${result.localId}. This confirms persistence, not agent processing or task completion.`,
                     },
                 ],
                 isError: false,

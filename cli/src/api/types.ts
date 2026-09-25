@@ -3,6 +3,7 @@ import {
     AttachmentMetadataSchema,
     MachineMetadataSchema,
     MetadataSchema,
+    PeerMessageMetadataSchema,
     RunnerStateSchema
 } from '@hapi/protocol/schemas'
 import {
@@ -70,6 +71,8 @@ export type {
 }
 
 export const MessageMetaSchema = z.object({
+    // Reads tolerate future Hub fields; authenticated Hub ingress remains strict.
+    peer: PeerMessageMetadataSchema.strip().optional(),
     sentFrom: z.string().optional(),
     // Shared Codex queue mirrors are replayable input, not transcript echoes.
     isNativeQueuedMessage: z.boolean().optional(),

@@ -184,7 +184,7 @@ export async function handlePingPeerCommand(args: string[]): Promise<void> {
         onProgress: (line) => console.log(`hapi ping-peer: ${line}`)
     })
 
-    console.log(chalk.green(`hapi ping-peer: OK - delivered to ${result.sessionId}`))
+    console.log(chalk.green(`hapi ping-peer: OK - persisted for ${result.sessionId} (processing not confirmed)`))
 }
 
 export const pingPeerCommand: CommandDefinition = {

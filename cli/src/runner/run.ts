@@ -354,6 +354,9 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         return new Map<number, PersistedResumeProcess>();
       }
     })();
+    // Shared HAPI roots reported by a recovered child (no ChildProcess handle).
+    // Mirrors TrackedSession.sharedSessions; rebuilt from webhooks after restart.
+    const recoveredSharedSessions = new Map<number, Record<string, Metadata>>();
     const persistResumeProcesses = () => {
       const tmp = `${resumeProcessFile}.${process.pid}.tmp`;
       try {
@@ -415,9 +418,25 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     };
 
     // Helper functions
-    const getCurrentChildren = () => Array.from(pidToTrackedSession.values()).flatMap(session => session.sharedSessions
-      ? Object.entries(session.sharedSessions).map(([happySessionId, metadata]) => ({ ...session, happySessionId, happySessionMetadataFromLocalWebhook: metadata }))
-      : [session]);
+    const getCurrentChildren = (): TrackedSession[] => [
+      ...Array.from(pidToTrackedSession.values()).flatMap((session): TrackedSession[] => session.sharedSessions
+        ? Object.entries(session.sharedSessions).map(([happySessionId, metadata]) => ({ ...session, happySessionId, happySessionMetadataFromLocalWebhook: metadata }))
+        : [session]),
+      ...[...persistedResumeProcesses.values()].flatMap((record): TrackedSession[] => {
+        // Recovered children have no ChildProcess handle. Keep them visible while
+        // leaving stop requests on the generation-checked fallback below.
+        if (pidToTrackedSession.has(record.pid) || !record.confirmedSessionId
+          || pidToConfirmedSessionId.get(record.pid) !== record.confirmedSessionId) return [];
+        const recovered: TrackedSession = { startedBy: 'runner (recovered)', pid: record.pid,
+          happySessionId: record.confirmedSessionId, requestedHappySessionId: record.requestedSessionId };
+        // An existing shared map is authoritative: once every root is archived the
+        // child hosts nothing to show, and the archived primary must not reappear.
+        const shared = recoveredSharedSessions.get(record.pid);
+        return shared
+          ? Object.entries(shared).map(([happySessionId, metadata]) => ({ ...recovered, happySessionId, happySessionMetadataFromLocalWebhook: metadata }))
+          : [recovered];
+      })
+    ];
 
     // Handle webhook from HAPI session reporting itself
     const onHappySessionWebhook = (sessionId: string, sessionMetadata: Metadata) => {
@@ -434,6 +453,38 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
       // Check if we already have this PID (runner-spawned)
       const existingSession = pidToTrackedSession.get(pid);
+
+      const recovered = persistedResumeProcesses.get(pid);
+      if (!existingSession && recovered) {
+        // Quarantine an unverifiable or reused PID; it must never fall through
+        // to the legacy orphan termination path below.
+        if (getProcessStartMarker(pid) !== recovered.processStartMarker) return;
+        if (sessionMetadata.capabilities?.concurrentClients) {
+          const shared = recoveredSharedSessions.get(pid) ?? {};
+          recoveredSharedSessions.set(pid, shared);
+          if (sessionMetadata.lifecycleState === 'archived') {
+            // An archived root must not re-confirm the child; its siblings stay live.
+            // It is a verified exit until a later webhook reactivates it.
+            delete shared[sessionId];
+            rememberVerifiedExit(sessionId);
+            return;
+          }
+          shared[sessionId] = sessionMetadata;
+          invalidateVerifiedExit(sessionId);
+          // Native /new or /fork cannot replace the primary spawn confirmation.
+          if (recovered.confirmedSessionId && recovered.confirmedSessionId !== sessionId) return;
+        }
+        // A verified child may reconnect or change its HAPI row after /clear.
+        // It is already owned by this runner generation, not a late orphan.
+        recovered.confirmedSessionId = sessionId;
+        pidToRequestedSessionId.set(pid, recovered.requestedSessionId);
+        pidToConfirmedSessionId.set(pid, sessionId);
+        spawnSession.recoverChild(recovered.requestedSessionId, { type: 'success', sessionId });
+        invalidateVerifiedExit(sessionId);
+        invalidateVerifiedExit(`PID-${pid}`);
+        persistResumeProcesses();
+        return;
+      }
 
       if (existingSession && sessionMetadata.capabilities?.concurrentClients) {
         existingSession.sharedSessions ??= {};
@@ -997,6 +1048,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           await runtimeControl(sharedRuntime, 'hapi/stopSession', sessionId);
           const tracked = pidToTrackedSession.get(sharedRuntime.pid);
           if (tracked?.sharedSessions) delete tracked.sharedSessions[sessionId];
+          const recoveredShared = recoveredSharedSessions.get(sharedRuntime.pid);
+          if (recoveredShared) delete recoveredShared[sessionId];
           return 'stopped';
         } catch { return 'still_alive'; }
       }
@@ -1004,6 +1057,18 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         && runtime.sessions[sessionId]?.active && runtimeMayBeAlive(runtime))) return 'still_alive';
       // Missing registry is not permission to kill siblings in a live execution.
       if ([...pidToTrackedSession.values()].some(session => session.sharedSessions?.[sessionId])) return 'still_alive';
+      for (const [pid, shared] of recoveredSharedSessions.entries()) {
+        if (!shared[sessionId]) continue;
+        if (isProcessAlive(pid)) {
+          const persisted = persistedResumeProcesses.get(pid);
+          const marker = getProcessStartMarker(pid);
+          // An unknown generation is quarantine, never proof of exit (same as the PID fallback).
+          if (!persisted || marker === null || marker === persisted.processStartMarker) return 'still_alive';
+        }
+        // The recovered generation is gone or replaced: its roots are verified exits, not live siblings.
+        for (const id of Object.keys(shared)) rememberVerifiedExit(id);
+        recoveredSharedSessions.delete(pid);
+      }
 
       // Try to find by sessionId first
       for (const [pid, session] of pidToTrackedSession.entries()) {
@@ -1087,7 +1152,17 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
             return 'already_gone';
           }
+          // Missing registry is not permission to kill siblings in a live execution.
+          const liveSiblings = Object.keys(recoveredSharedSessions.get(pid) ?? {}).filter(id => id !== sessionId);
+          if (liveSiblings.length > 0) return 'still_alive';
+          // After a runner restart the in-memory map is empty; the on-disk registry
+          // still lists every root this generation hosts.
+          if ((await readRuntimes()).some(runtime => runtime.pid === pid && runtime.hub === configuration.apiUrl
+            && runtime.authHash === runtimeAuthHash() && runtimeMayBeAlive(runtime)
+            && Object.entries(runtime.sessions).some(([id, root]) => id !== sessionId && root.active))) return 'still_alive';
           if (!(await killProcessTreeByPid(pid))) return 'still_alive';
+          for (const id of Object.keys(recoveredSharedSessions.get(pid) ?? {})) rememberVerifiedExit(id);
+          recoveredSharedSessions.delete(pid);
           if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
           if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
           rememberVerifiedExit(`PID-${pid}`);
@@ -1097,6 +1172,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
           return 'stopped';
         }
+        for (const id of Object.keys(recoveredSharedSessions.get(pid) ?? {})) rememberVerifiedExit(id);
+        recoveredSharedSessions.delete(pid);
         if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
         if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
         rememberVerifiedExit(`PID-${pid}`);
@@ -1119,6 +1196,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const onChildExited = (pid: number) => {
       const session = pidToTrackedSession.get(pid);
       for (const id of Object.keys(session?.sharedSessions ?? {})) rememberVerifiedExit(id);
+      for (const id of Object.keys(recoveredSharedSessions.get(pid) ?? {})) rememberVerifiedExit(id);
+      recoveredSharedSessions.delete(pid);
       const requestedSessionId = session?.requestedHappySessionId ?? pidToRequestedSessionId.get(pid);
       if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
       const confirmedSessionId = session?.happySessionId ?? pidToConfirmedSessionId.get(pid);
@@ -1163,8 +1242,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // but in compiled binary mode (`bun build --compile`) the raw argv shape is
     // `[hapi, runner, start-sync, ...]` so slice(2) produced `['start-sync', ...]`.
     // The replacement then spawned `hapi start-sync ...`, which `resolveCommand`
-    // treats as an unknown top-level command - falling back to Claude instead
-    // of starting the runner. `getCliArgs()` strips runtime + entrypoint
+    // now rejects as an unknown top-level command (previously it fell back to
+    // Claude). `getCliArgs()` strips runtime + entrypoint
     // correctly in all execution modes.
     //
     // Defensive guard: only replay the captured argv when it actually starts
@@ -1257,7 +1336,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // regardless of the verbose/quiet logger setting.
     console.log('');
     console.log('Hapi runner started.');
-    console.log(`  Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set — browsing is limited to home)'}`);
+    console.log(`  Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set — browsing and spawning are unrestricted)'}`);
     console.log(`  Hub URL:        ${configuration.apiUrl}`);
     console.log(`  Machine ID:     ${machine.id}`);
     console.log(`  Control port:   ${controlPort}`);
@@ -1493,19 +1572,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       // Heartbeat
       try {
         const updatedState: RunnerLocallyPersistedState = {
-          pid: process.pid,
-          httpPort: controlPort,
-          startTime: fileState.startTime,
-          startedWithCliVersion: packageJson.version,
-          startedWithCliMtimeMs,
-          startedWithApiUrl: fileState.startedWithApiUrl,
-          startedWithMachineId: fileState.startedWithMachineId,
-          startedWithCliApiTokenHash: fileState.startedWithCliApiTokenHash,
-          startedWithExtraHeadersHash: fileState.startedWithExtraHeadersHash,
-          startedWithArgv,
-          startedWithVersionHandoffDisabled,
-          lastHeartbeat: new Date().toLocaleString(),
-          runnerLogPath: fileState.runnerLogPath
+          ...fileState,
+          lastHeartbeat: new Date().toLocaleString()
         };
         writeRunnerState(updatedState);
         if (process.env.DEBUG) {

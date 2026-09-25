@@ -13,12 +13,13 @@ import { readTitleProviderConfig } from '../sync/titleSuggestion'
 import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
 import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
 import type { SyncEngine } from '../sync/syncEngine'
-import { createAuthMiddleware, type WebAppEnv } from './middleware/auth'
+import { createAuthMiddleware, verifyOwnerJwt, type WebAppEnv } from './middleware/auth'
 import { createAuthRoutes } from './routes/auth'
 import { createBindRoutes } from './routes/bind'
 import { createEventsRoutes } from './routes/events'
 import { createSessionsRoutes } from './routes/sessions'
 import { createMessagesRoutes } from './routes/messages'
+import { createPeerCapabilityRoutes, createPeerMessagesRoutes } from './routes/peerMessages'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
@@ -38,7 +39,6 @@ import type { Server as BunServer, ServerWebSocket } from 'bun'
 import { applyDefaultWsCompression } from './wsCompression'
 import { acceptsGzip } from './sseCompression'
 import type { Server as SocketEngine } from '@socket.io/bun-engine'
-import { jwtVerify } from 'jose'
 import type { WebSocketData } from '@socket.io/bun-engine'
 import { loadEmbeddedAssetMap, type EmbeddedWebAsset } from './embeddedAssets'
 import { isBunCompiled } from '../utils/bunCompiled'
@@ -246,6 +246,7 @@ function createWebApp(options: {
     app.use('/health', corsMiddleware)
     app.use('/api/*', corsMiddleware)
     app.use('/cli/*', corsMiddleware)
+    app.use('/peer/*', corsMiddleware)
 
     // Health check endpoint (no auth required).
     // Capabilities are additive so older clients can ignore unknown fields.
@@ -254,6 +255,7 @@ function createWebApp(options: {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {
             workGraph: true,
+            peerMessages: true,
             titleSuggestion: readTitleProviderConfig() !== null
         }
     }))
@@ -280,6 +282,7 @@ function createWebApp(options: {
     })
 
     app.route('/cli', createCliRoutes(options.getSyncEngine))
+    app.route('/peer', createPeerMessagesRoutes(options.jwtSecret, options.getSyncEngine))
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
@@ -288,6 +291,7 @@ function createWebApp(options: {
     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
+    app.route('/api', createPeerCapabilityRoutes(options.jwtSecret, options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
     app.route('/api', createStorageRoutes(configuration.dbPath))
@@ -506,7 +510,7 @@ export async function startWebServer(options: {
                     return new Response('Missing authorization token', { status: 401 })
                 }
                 try {
-                    await jwtVerify(token, options.jwtSecret, { algorithms: ['HS256'] })
+                    await verifyOwnerJwt(token, options.jwtSecret)
                 } catch {
                     return new Response('Invalid token', { status: 401 })
                 }
