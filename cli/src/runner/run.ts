@@ -429,8 +429,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           || pidToConfirmedSessionId.get(record.pid) !== record.confirmedSessionId) return [];
         const recovered: TrackedSession = { startedBy: 'runner (recovered)', pid: record.pid,
           happySessionId: record.confirmedSessionId, requestedHappySessionId: record.requestedSessionId };
+        // An existing shared map is authoritative: once every root is archived the
+        // child hosts nothing to show, and the archived primary must not reappear.
         const shared = recoveredSharedSessions.get(record.pid);
-        return shared && Object.keys(shared).length > 0
+        return shared
           ? Object.entries(shared).map(([happySessionId, metadata]) => ({ ...recovered, happySessionId, happySessionMetadataFromLocalWebhook: metadata }))
           : [recovered];
       })
@@ -462,7 +464,9 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           recoveredSharedSessions.set(pid, shared);
           if (sessionMetadata.lifecycleState === 'archived') {
             // An archived root must not re-confirm the child; its siblings stay live.
+            // It is a verified exit until a later webhook reactivates it.
             delete shared[sessionId];
+            rememberVerifiedExit(sessionId);
             return;
           }
           shared[sessionId] = sessionMetadata;
@@ -1053,7 +1057,18 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         && runtime.sessions[sessionId]?.active && runtimeMayBeAlive(runtime))) return 'still_alive';
       // Missing registry is not permission to kill siblings in a live execution.
       if ([...pidToTrackedSession.values()].some(session => session.sharedSessions?.[sessionId])) return 'still_alive';
-      if ([...recoveredSharedSessions.values()].some(shared => shared[sessionId])) return 'still_alive';
+      for (const [pid, shared] of recoveredSharedSessions.entries()) {
+        if (!shared[sessionId]) continue;
+        if (isProcessAlive(pid)) {
+          const persisted = persistedResumeProcesses.get(pid);
+          const marker = getProcessStartMarker(pid);
+          // An unknown generation is quarantine, never proof of exit (same as the PID fallback).
+          if (!persisted || marker === null || marker === persisted.processStartMarker) return 'still_alive';
+        }
+        // The recovered generation is gone or replaced: its roots are verified exits, not live siblings.
+        for (const id of Object.keys(shared)) rememberVerifiedExit(id);
+        recoveredSharedSessions.delete(pid);
+      }
 
       // Try to find by sessionId first
       for (const [pid, session] of pidToTrackedSession.entries()) {
@@ -1140,6 +1155,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           // Missing registry is not permission to kill siblings in a live execution.
           const liveSiblings = Object.keys(recoveredSharedSessions.get(pid) ?? {}).filter(id => id !== sessionId);
           if (liveSiblings.length > 0) return 'still_alive';
+          // After a runner restart the in-memory map is empty; the on-disk registry
+          // still lists every root this generation hosts.
+          if ((await readRuntimes()).some(runtime => runtime.pid === pid && runtime.hub === configuration.apiUrl
+            && runtime.authHash === runtimeAuthHash() && runtimeMayBeAlive(runtime)
+            && Object.entries(runtime.sessions).some(([id, root]) => id !== sessionId && root.active))) return 'still_alive';
           if (!(await killProcessTreeByPid(pid))) return 'still_alive';
           for (const id of Object.keys(recoveredSharedSessions.get(pid) ?? {})) rememberVerifiedExit(id);
           recoveredSharedSessions.delete(pid);
@@ -1176,6 +1196,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const onChildExited = (pid: number) => {
       const session = pidToTrackedSession.get(pid);
       for (const id of Object.keys(session?.sharedSessions ?? {})) rememberVerifiedExit(id);
+      for (const id of Object.keys(recoveredSharedSessions.get(pid) ?? {})) rememberVerifiedExit(id);
+      recoveredSharedSessions.delete(pid);
       const requestedSessionId = session?.requestedHappySessionId ?? pidToRequestedSessionId.get(pid);
       if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
       const confirmedSessionId = session?.happySessionId ?? pidToConfirmedSessionId.get(pid);

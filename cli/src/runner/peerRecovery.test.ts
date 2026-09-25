@@ -156,6 +156,13 @@ describe.skipIf(process.platform !== 'linux')('runner recovered peer-era session
             expect(child.exitCode).toBeNull()
             expect(child.signalCode).toBeNull()
             expect(await listedRoots()).toEqual([rootB])
+            // Once every root is archived the child lists nothing and the archived
+            // primary does not reappear; the process is then stoppable again.
+            await post('/session-started', { sessionId: rootB, metadata: { ...shared, lifecycleState: 'archived' } })
+            expect(await listedRoots()).toEqual([])
+            expect(await post('/stop-session', { sessionId: rootA })).toMatchObject({ status: 'stopped' })
+            await until(async () => child.exitCode !== null || child.signalCode !== null ? true : undefined, 'shared child stopped')
+            expect(await post('/stop-session', { sessionId: rootB })).toMatchObject({ status: 'already_gone' })
         } finally {
             await stop(runner)
             await stop(child)
