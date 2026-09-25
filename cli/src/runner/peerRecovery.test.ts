@@ -109,4 +109,56 @@ describe.skipIf(process.platform !== 'linux')('runner recovered peer-era session
             await stop(unrelated)
         }
     }, 30_000)
+
+    it('keeps shared roots of a recovered child listed and never kills siblings when one root is archived or stopped', async () => {
+        const rootA = randomUUID()
+        const rootB = randomUUID()
+        const home = await mkdtemp(join(tmpdir(), 'hapi-peer-recovery-shared-'))
+        const child = spawn(runtime, ['--eval', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true })
+        expect(child.pid).toBeDefined()
+        const marker = getProcessStartMarker(child.pid!)
+        expect(marker).not.toBeNull()
+        await writeFile(join(home, 'runner.state.json.resume-processes.json'), JSON.stringify([
+            { requestedSessionId: rootA, confirmedSessionId: rootA, pid: child.pid, processStartMarker: marker }
+        ]))
+        const runner = spawn(runtime, ['src/index.ts', 'runner', 'start-sync', '--workspace-root', home], {
+            cwd: projectPath(),
+            env: { ...process.env, HAPI_HOME: home, HAPI_API_URL: configuration.apiUrl, HAPI_DISABLE_VERSION_HANDOFF: '1' },
+            stdio: 'ignore'
+        })
+        try {
+            const state = await until(async () => {
+                try {
+                    const record = JSON.parse(await readFile(join(home, 'runner.state.json'), 'utf8')) as { pid?: number; httpPort?: number }
+                    return record.pid === runner.pid && record.httpPort ? record as { pid: number; httpPort: number } : undefined
+                } catch { return undefined }
+            }, 'isolated runner ready')
+            const post = async (path: string, body: unknown = {}) => {
+                const response = await fetch(`http://127.0.0.1:${state.httpPort}${path}`, {
+                    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+                })
+                expect(response.status).toBe(200)
+                return response.json() as Promise<{ children?: Array<{ happySessionId?: string; pid: number }>; status?: string }>
+            }
+            const shared = { hostPid: child.pid, startedBy: 'runner', capabilities: { concurrentClients: true } }
+            const listedRoots = async () => (await post('/list')).children!.filter(entry => entry.pid === child.pid).map(entry => entry.happySessionId).sort()
+            await post('/session-started', { sessionId: rootA, metadata: shared })
+            expect(await listedRoots()).toEqual([rootA])
+            // A second root in the same process joins the list instead of displacing the primary.
+            await post('/session-started', { sessionId: rootB, metadata: shared })
+            expect(await listedRoots()).toEqual([rootA, rootB].sort())
+            // Archiving A drops it from the list and must not re-confirm it as the child.
+            await post('/session-started', { sessionId: rootA, metadata: { ...shared, lifecycleState: 'archived' } })
+            expect(await listedRoots()).toEqual([rootB])
+            // Stopping the archived primary must not PID-kill the process still hosting B.
+            expect(await post('/stop-session', { sessionId: rootA })).toMatchObject({ status: 'still_alive' })
+            await new Promise(resolve => setTimeout(resolve, 200))
+            expect(child.exitCode).toBeNull()
+            expect(child.signalCode).toBeNull()
+            expect(await listedRoots()).toEqual([rootB])
+        } finally {
+            await stop(runner)
+            await stop(child)
+        }
+    }, 30_000)
 })

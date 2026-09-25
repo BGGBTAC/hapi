@@ -354,6 +354,9 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         return new Map<number, PersistedResumeProcess>();
       }
     })();
+    // Shared HAPI roots reported by a recovered child (no ChildProcess handle).
+    // Mirrors TrackedSession.sharedSessions; rebuilt from webhooks after restart.
+    const recoveredSharedSessions = new Map<number, Record<string, Metadata>>();
     const persistResumeProcesses = () => {
       const tmp = `${resumeProcessFile}.${process.pid}.tmp`;
       try {
@@ -424,8 +427,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         // leaving stop requests on the generation-checked fallback below.
         if (pidToTrackedSession.has(record.pid) || !record.confirmedSessionId
           || pidToConfirmedSessionId.get(record.pid) !== record.confirmedSessionId) return [];
-        return [{ startedBy: 'runner (recovered)', pid: record.pid,
-          happySessionId: record.confirmedSessionId, requestedHappySessionId: record.requestedSessionId }];
+        const recovered: TrackedSession = { startedBy: 'runner (recovered)', pid: record.pid,
+          happySessionId: record.confirmedSessionId, requestedHappySessionId: record.requestedSessionId };
+        const shared = recoveredSharedSessions.get(record.pid);
+        return shared && Object.keys(shared).length > 0
+          ? Object.entries(shared).map(([happySessionId, metadata]) => ({ ...recovered, happySessionId, happySessionMetadataFromLocalWebhook: metadata }))
+          : [recovered];
       })
     ];
 
@@ -450,6 +457,19 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         // Quarantine an unverifiable or reused PID; it must never fall through
         // to the legacy orphan termination path below.
         if (getProcessStartMarker(pid) !== recovered.processStartMarker) return;
+        if (sessionMetadata.capabilities?.concurrentClients) {
+          const shared = recoveredSharedSessions.get(pid) ?? {};
+          recoveredSharedSessions.set(pid, shared);
+          if (sessionMetadata.lifecycleState === 'archived') {
+            // An archived root must not re-confirm the child; its siblings stay live.
+            delete shared[sessionId];
+            return;
+          }
+          shared[sessionId] = sessionMetadata;
+          invalidateVerifiedExit(sessionId);
+          // Native /new or /fork cannot replace the primary spawn confirmation.
+          if (recovered.confirmedSessionId && recovered.confirmedSessionId !== sessionId) return;
+        }
         // A verified child may reconnect or change its HAPI row after /clear.
         // It is already owned by this runner generation, not a late orphan.
         recovered.confirmedSessionId = sessionId;
@@ -1024,6 +1044,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           await runtimeControl(sharedRuntime, 'hapi/stopSession', sessionId);
           const tracked = pidToTrackedSession.get(sharedRuntime.pid);
           if (tracked?.sharedSessions) delete tracked.sharedSessions[sessionId];
+          const recoveredShared = recoveredSharedSessions.get(sharedRuntime.pid);
+          if (recoveredShared) delete recoveredShared[sessionId];
           return 'stopped';
         } catch { return 'still_alive'; }
       }
@@ -1031,6 +1053,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         && runtime.sessions[sessionId]?.active && runtimeMayBeAlive(runtime))) return 'still_alive';
       // Missing registry is not permission to kill siblings in a live execution.
       if ([...pidToTrackedSession.values()].some(session => session.sharedSessions?.[sessionId])) return 'still_alive';
+      if ([...recoveredSharedSessions.values()].some(shared => shared[sessionId])) return 'still_alive';
 
       // Try to find by sessionId first
       for (const [pid, session] of pidToTrackedSession.entries()) {
@@ -1114,7 +1137,12 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
             return 'already_gone';
           }
+          // Missing registry is not permission to kill siblings in a live execution.
+          const liveSiblings = Object.keys(recoveredSharedSessions.get(pid) ?? {}).filter(id => id !== sessionId);
+          if (liveSiblings.length > 0) return 'still_alive';
           if (!(await killProcessTreeByPid(pid))) return 'still_alive';
+          for (const id of Object.keys(recoveredSharedSessions.get(pid) ?? {})) rememberVerifiedExit(id);
+          recoveredSharedSessions.delete(pid);
           if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
           if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
           rememberVerifiedExit(`PID-${pid}`);
@@ -1124,6 +1152,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           releaseRecoveredSpawnDedupe(pid, existingSessionIdByChildPid, spawnSession);
           return 'stopped';
         }
+        for (const id of Object.keys(recoveredSharedSessions.get(pid) ?? {})) rememberVerifiedExit(id);
+        recoveredSharedSessions.delete(pid);
         if (requestedSessionId) rememberVerifiedExit(requestedSessionId);
         if (confirmedSessionId) rememberVerifiedExit(confirmedSessionId);
         rememberVerifiedExit(`PID-${pid}`);
