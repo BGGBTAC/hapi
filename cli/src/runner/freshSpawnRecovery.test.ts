@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { configuration } from '@/configuration'
 import { projectPath } from '@/projectPath'
-import { isProcessAlive, killProcessTreeByPid } from '@/utils/process'
+import { getProcessStartMarker, isProcessAlive, killProcessTreeByPid } from '@/utils/process'
 
 /**
  * A fresh spawn (no reserved HAPI id: the hub only passes one for resume)
@@ -74,7 +74,11 @@ describe.skipIf(process.platform !== 'linux')('runner fresh-spawn recovery', () 
         let restarted: ChildProcess | undefined
         try {
             const post = poster(await runnerReady(home, runner))
-            await post('/session-started', { sessionId, metadata: { hostPid: child.pid, startedBy: 'runner' } })
+            // A CLI names its own process generation; the synthetic child is not a
+            // runner spawn on argv, so the marker is what makes it adoptable.
+            const hostStartMarker = getProcessStartMarker(child.pid!)
+            expect(hostStartMarker).not.toBeNull()
+            await post('/session-started', { sessionId, metadata: { hostPid: child.pid, hostStartMarker, startedBy: 'runner' } })
             await new Promise(resolve => setTimeout(resolve, 300))
             expect(child.exitCode).toBeNull()
             expect(child.signalCode).toBeNull()
@@ -93,6 +97,35 @@ describe.skipIf(process.platform !== 'linux')('runner fresh-spawn recovery', () 
             await stop(runner)
             await stop(restarted)
             await stop(child)
+        }
+    }, 30_000)
+
+    it('refuses to adopt a webhook whose PID belongs to another process generation', async () => {
+        const sessionId = randomUUID()
+        const home = await mkdtemp(join(tmpdir(), 'hapi-fresh-spawn-reused-pid-'))
+        // Stands in for a PID the OS handed to another process after the reporting
+        // CLI died: a wrong marker, or no marker at all, never proves the generation.
+        const bystander = spawn(runtime, ['--eval', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true })
+        expect(bystander.pid).toBeDefined()
+        let runner: ChildProcess | undefined = startRunner(home)
+        try {
+            const post = poster(await runnerReady(home, runner))
+            for (const metadata of [
+                { hostPid: bystander.pid, hostStartMarker: 'Thu Jan  1 00:00:00 1970', startedBy: 'runner' },
+                { hostPid: bystander.pid, startedBy: 'runner' }
+            ]) {
+                await post('/session-started', { sessionId, metadata })
+                await new Promise(resolve => setTimeout(resolve, 300))
+                expect(bystander.exitCode).toBeNull()
+                expect(bystander.signalCode).toBeNull()
+                expect(await post('/list')).toMatchObject({ children: [] })
+                expect(await readResumeRecords(home)).toEqual([])
+                expect(await post('/stop-session', { sessionId })).toMatchObject({ status: 'still_alive' })
+                expect(bystander.exitCode).toBeNull()
+            }
+        } finally {
+            await stop(runner)
+            await stop(bystander)
         }
     }, 30_000)
 

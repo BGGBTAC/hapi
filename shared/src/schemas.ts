@@ -129,6 +129,9 @@ export const MetadataSchema = z.object({
     happyToolsDir: z.string().optional(),
     startedFromRunner: z.boolean().optional(),
     hostPid: z.number().optional(),
+    // Start marker of the reporting process (see cli getProcessStartMarker): lets the
+    // runner refuse to adopt a webhook whose PID has since been reused.
+    hostStartMarker: z.string().optional(),
     hapiMcpUrl: z.string().url().optional(),
     startedBy: z.enum(['runner', 'terminal']).optional(),
     // 'running' | 'idle' | 'archived' (see shared/src/sessionLifecycle.ts).

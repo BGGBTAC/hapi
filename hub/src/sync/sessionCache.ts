@@ -590,7 +590,10 @@ export class SessionCache {
         }
 
         const nextUpdatedAt = Math.max(stored.updatedAt, updatedAt)
-        this.recordAgentProgress(sessionId, nextUpdatedAt)
+        // Progress is the activity's own time, not the floored row clock: a history
+        // replay carrying an old timestamp must not wake an idle session just because
+        // some metadata write moved `updatedAt` since.
+        this.recordAgentProgress(sessionId, updatedAt)
         const touched = this.store.sessions.touchSessionUpdatedAt(sessionId, nextUpdatedAt, stored.namespace)
         const session = this.sessions.get(sessionId)
 

@@ -1046,7 +1046,12 @@ export class SyncEngine {
         if (this.historyActionsInFlight.has(sessionId)) {
             throw new Error('Conversation history action already in progress')
         }
-        const { actualSessionId, createdAt: activeTurnStartedAt } = await this.messageService.sendMessage(sessionId, payload)
+        const { actualSessionId, createdAt: activeTurnStartedAt, inserted, invokedAt } = await this.messageService.sendMessage(sessionId, payload)
+        // A retry of a message the agent already consumed resolved to that old row:
+        // nothing is queued, so it is neither a fresh turn nor agent progress (it must
+        // not wake an idle session or re-arm `thinking`). A retry of a still-queued
+        // message keeps starting a fresh grace window.
+        if (!inserted && invokedAt !== null) return
         this.sessionCache.markMessageQueued(actualSessionId, Date.now(), activeTurnStartedAt)
         this.sessionCache.recordSessionActivity(actualSessionId, Date.now())
     }
@@ -1080,8 +1085,10 @@ export class SyncEngine {
             localId: `peer:${encodeURIComponent(sender.id)}:${encodeURIComponent(payload.localId)}`,
             deliveryMode: 'queue'
         }, peer)
-        this.sessionCache.markMessageQueued(result.actualSessionId, Date.now(), result.createdAt)
-        this.sessionCache.recordSessionActivity(result.actualSessionId, Date.now())
+        if (result.inserted || result.invokedAt === null) {
+            this.sessionCache.markMessageQueued(result.actualSessionId, Date.now(), result.createdAt)
+            this.sessionCache.recordSessionActivity(result.actualSessionId, Date.now())
+        }
         return {
             status: 'persisted' as const,
             recipientSessionId: result.actualSessionId,

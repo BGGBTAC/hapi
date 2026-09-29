@@ -154,7 +154,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt)
+        const { message: msg, inserted } = store.messages.addMessageWithStatus(sid, content, localId, undefined, createdAt)
+        // A localId the session already stored is a reconnect replay (history
+        // resync, transcript backfill), not new work: no progress clock, no
+        // activity, no todo/team/background-task deltas, no re-broadcast.
+        if (!inserted) {
+            return
+        }
 
         // A reasoning stream arrives as a series of growing snapshots under one
         // stable id, so a stream should cost one row rather than one per

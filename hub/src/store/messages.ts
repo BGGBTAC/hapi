@@ -107,6 +107,11 @@ export type CopyStoredMessageInput = Pick<
     'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'deliveryState'
 >
 
+/** Only addMessage attaches `meta.peer`, and only for a trusted peer write (forged copies are stripped). */
+function isAuthenticatedPeerContent(content: unknown): boolean {
+    return isObject(content) && isObject(content.meta) && isObject(content.meta.peer)
+}
+
 /** The hub-authored (peer_authenticated) row behind a peer localId, if the session has one. */
 export function getAuthenticatedPeerMessage(db: Database, sessionId: string, localId: string): StoredMessage | null {
     const peerLocalId = hubPeerLocalId(localId)
@@ -131,6 +136,23 @@ export function addMessage(
     createdAt?: number,
     trustedPeer?: PeerMessageMetadata
 ): StoredMessage {
+    return addMessageWithStatus(db, sessionId, content, localId, scheduledAt, createdAt, trustedPeer).message
+}
+
+/**
+ * `inserted: false` means the localId resolved to a row the session already had
+ * (a CLI reconnect replay, a client retry): callers must not treat it as new
+ * agent work — no progress, no task deltas, no fresh queue marking.
+ */
+export function addMessageWithStatus(
+    db: Database,
+    sessionId: string,
+    content: unknown,
+    localId?: string,
+    scheduledAt?: number | null,
+    createdAt?: number,
+    trustedPeer?: PeerMessageMetadata
+): { message: StoredMessage; inserted: boolean } {
     content = stripPeerMetadata(content)
     if (localId && !trustedPeer) {
         // A `peer:` localId is minted by the hub itself (SyncEngine.sendPeerMessage). An
@@ -139,7 +161,7 @@ export function addMessage(
         // Returning the authenticated row keeps the replay idempotent; externalizing it
         // would insert an `external:peer:` copy with no ack path that stays queued forever.
         const echoed = getAuthenticatedPeerMessage(db, sessionId, localId)
-        if (echoed) return echoed
+        if (echoed) return { message: echoed, inserted: false }
         localId = externalLocalId(localId)
     }
     if (trustedPeer && isObject(content)) {
@@ -182,7 +204,7 @@ export function addMessage(
                     throw new PeerMessageConflictError()
                 }
             }
-            return stored
+            return { message: stored, inserted: false }
         }
     }
 
@@ -226,7 +248,7 @@ export function addMessage(
         if (previousHead && positionAt < previousHead.at) bumpMessageEpoch(db, sessionId)
         const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as DbMessageRow | undefined
         if (!row) throw new Error('Failed to create message')
-        return toStoredMessage(row)
+        return { message: toStoredMessage(row), inserted: true }
     })()
 }
 
@@ -236,11 +258,14 @@ export function syncNativeQueuedMessage(db: Database, sessionId: string, localId
         const initial = { role: 'user', content: { type: 'text', text }, meta: { sentFrom: 'cli', isNativeQueuedMessage: true } }
         const message = addMessage(db, sessionId, initial, localId)
         if (message.invokedAt !== null) return message
+        // A hub-authored peer row resolved from a replayed peer id keeps its text: the
+        // engine echoes what it received, it does not own that message.
+        if (isAuthenticatedPeerContent(message.content)) return message
         // Native text edits must not erase Web attachments or origin metadata.
         const prior = z.object({ role: z.literal('user'), content: z.object({ type: z.literal('text') }).passthrough() }).passthrough().safeParse(message.content)
         const content = prior.success ? { ...prior.data, content: { ...prior.data.content, text } } : initial
         const encoded = encodeMessageContent(truncateOversizedMessageContent(content))
-        db.prepare('UPDATE messages SET content = ? WHERE session_id = ? AND local_id = ? AND invoked_at IS NULL')
+        db.prepare('UPDATE messages SET content = ? WHERE session_id = ? AND local_id = ? AND invoked_at IS NULL AND peer_authenticated = 0')
             .run(encoded, sessionId, localId)
         return { ...message, content }
     })()

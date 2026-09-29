@@ -592,6 +592,15 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             logger.debug(`[RUNNER RUN] Cannot verify process generation for untracked runner-spawned PID ${pid} (session ${sessionId}); not adopting`);
             return;
           }
+          // The webhook may be late: if the PID was reused since, storing the
+          // current marker would let a later stopSession pass the generation
+          // check and kill a foreign process tree — even another runner-spawned
+          // CLI. Only the reporting process's own marker proves the generation;
+          // a webhook without one (older CLI) is left untracked.
+          if (sessionMetadata.hostStartMarker !== processStartMarker) {
+            logger.debug(`[RUNNER RUN] Untracked runner-spawned PID ${pid} (session ${sessionId}) is not the reporting process generation; not adopting`);
+            return;
+          }
           persistedResumeProcesses.set(pid, {
             requestedSessionId: sessionId,
             confirmedSessionId: sessionId,

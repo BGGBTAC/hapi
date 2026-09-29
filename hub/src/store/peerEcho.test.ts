@@ -54,6 +54,12 @@ describe('peer message replayed by an untrusted writer', () => {
         expect(wrapped.inserted).toBe(false)
         expect(wrapped.message.id).toBe(trusted.message.id)
 
+        // A shared engine syncing its native queue must not rewrite the hub's text either.
+        const synced = store.messages.syncNativeQueuedMessage(session.id, peerLocalId, 'tampered')
+        expect(synced.id).toBe(trusted.message.id)
+        expect(synced.content).toMatchObject({ content: { text: '[peer] hello' } })
+        expect(store.messages.getMessageById(session.id, trusted.message.id)?.content).toMatchObject({ content: { text: '[peer] hello' } })
+
         expect(queuedRows(path, session.id)).toEqual([{ local_id: peerLocalId, peer_authenticated: 1 }])
         store.close()
     })

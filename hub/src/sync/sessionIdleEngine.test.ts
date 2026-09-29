@@ -141,6 +141,71 @@ describe('SyncEngine keepalive-idle tick', () => {
         })
     })
 
+    it('a replayed old activity timestamp does not wake an idle session, a new one does', () => {
+        withIdleWindow(HOUR, () => {
+            const { store, engine } = createEngine()
+            try {
+                const session = engine.getOrCreateSession('replay', RUNNING, null, 'default')
+                const startedAt = Date.now()
+                engine.handleSessionAlive({ sid: session.id, time: startedAt })
+                setSystemTime(new Date(startedAt + 2 * HOUR))
+                engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+                ;(engine as unknown as { expireInactive(): void }).expireInactive()
+                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('idle')
+
+                // A metadata write moved updatedAt to now; a history replay then reports
+                // activity from before the idle window.
+                const current = store.sessions.getSessionByNamespace(session.id, 'default')!
+                const renamed = store.sessions.updateSessionMetadata(session.id, { ...current.metadata!, name: 'renamed' }, current.metadataVersion, 'default')
+                expect(renamed.result).toBe('success')
+                expect(store.sessions.getSession(session.id)!.updatedAt).toBeGreaterThan(startedAt)
+                engine.recordSessionActivity(session.id, startedAt)
+                ;(engine as unknown as { expireInactive(): void }).expireInactive()
+                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('idle')
+
+                // Genuine new activity still wakes it.
+                engine.recordSessionActivity(session.id, Date.now())
+                ;(engine as unknown as { expireInactive(): void }).expireInactive()
+                expect(engine.getSession(session.id)?.metadata?.lifecycleState).toBe('running')
+            } finally {
+                setSystemTime()
+                engine.stop()
+            }
+        })
+    })
+
+    it('a duplicate send of an already consumed message neither queues a turn nor counts as progress', async () => {
+        // sendMessage emits to the CLI namespace: give the engine a socket.io stand-in.
+        const store = new Store(':memory:')
+        const io = { of: () => ({ to: () => ({ emit() {} }) }) }
+        const engine = new SyncEngine(store, io as never, new RpcRegistry(), { broadcast() {} } as never)
+        try {
+            const session = engine.getOrCreateSession('retry', RUNNING, null, 'default')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now() })
+            const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
+            const queued = mock(cache.markMessageQueued.bind(cache)); cache.markMessageQueued = queued
+            const activity = mock(cache.recordSessionActivity.bind(cache)); cache.recordSessionActivity = activity
+
+            await engine.sendMessage(session.id, { text: 'hello', localId: 'retry-1' })
+            expect(queued).toHaveBeenCalledTimes(1)
+            // Still queued: a deliberate retry re-arms the grace window (aliveEvents.test.ts).
+            await engine.sendMessage(session.id, { text: 'hello', localId: 'retry-1' })
+            expect(queued).toHaveBeenCalledTimes(2)
+
+            // Consumed by the agent: a late duplicate of the same POST changes nothing.
+            expect(store.messages.markMessagesInvoked(session.id, ['retry-1'], Date.now())).toBe(1)
+            const before = activity.mock.calls.length
+            await engine.sendMessage(session.id, { text: 'hello', localId: 'retry-1' })
+            expect(queued).toHaveBeenCalledTimes(2)
+            // The message service still reports the stored row's own time (harmless:
+            // the progress clock only moves forward); no "now" activity is recorded.
+            const createdAt = store.messages.getAllMessages(session.id)[0]!.createdAt
+            expect(activity.mock.calls.slice(before)).toEqual([[session.id, createdAt]])
+        } finally {
+            engine.stop()
+        }
+    })
+
     it('abort forgets background tasks so the session can reconcile idle', async () => {
         const { engine } = createEngine()
         try {
