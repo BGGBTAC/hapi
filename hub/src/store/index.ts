@@ -4,7 +4,7 @@ import { dirname } from 'node:path'
 
 import { MachineStore } from './machineStore'
 import { MessageStore } from './messageStore'
-import { addMessage } from './messages'
+import { addMessage, getAuthenticatedPeerMessage } from './messages'
 import type { StoredMessage } from './types'
 import type { PeerMessageMetadata } from '@hapi/protocol/schemas'
 import { externalLocalId } from './peerMetadata'
@@ -230,6 +230,8 @@ export class Store {
             const alreadyExists = storageLocalId
                 ? Boolean(this.db.prepare('SELECT 1 FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1')
                     .get(targetSessionId, storageLocalId))
+                    // An untrusted replay of a hub-minted peer id resolves to the authenticated row.
+                    || Boolean(localId && !trustedPeer && getAuthenticatedPeerMessage(this.db, targetSessionId, localId))
                 : false
             return {
                 sessionId: targetSessionId,

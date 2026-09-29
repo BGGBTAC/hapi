@@ -9,7 +9,7 @@ import type { StoredMessage } from './types'
 import { decodeMessageContent, encodeMessageContent, truncateOversizedMessageContent } from './contentCodec'
 import { isObject } from '@hapi/protocol'
 import type { PeerMessageMetadata } from '@hapi/protocol/schemas'
-import { externalLocalId, PeerMessageConflictError, stripPeerMetadata } from './peerMetadata'
+import { externalLocalId, hubPeerLocalId, PeerMessageConflictError, stripPeerMetadata } from './peerMetadata'
 
 type DbMessageRow = {
     id: string
@@ -107,6 +107,16 @@ export type CopyStoredMessageInput = Pick<
     'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt' | 'deliveryState'
 >
 
+/** The hub-authored (peer_authenticated) row behind a peer localId, if the session has one. */
+export function getAuthenticatedPeerMessage(db: Database, sessionId: string, localId: string): StoredMessage | null {
+    const peerLocalId = hubPeerLocalId(localId)
+    if (!peerLocalId) return null
+    const row = db.prepare(
+        'SELECT * FROM messages WHERE session_id = ? AND local_id = ? AND peer_authenticated = 1 LIMIT 1'
+    ).get(sessionId, peerLocalId) as DbMessageRow | undefined
+    return row ? toStoredMessage(row) : null
+}
+
 export function getMessageById(db: Database, sessionId: string, messageId: string): StoredMessage | null {
     const row = db.prepare('SELECT * FROM messages WHERE session_id = ? AND id = ?').get(sessionId, messageId) as DbMessageRow | undefined
     return row ? toStoredMessage(row) : null
@@ -122,7 +132,16 @@ export function addMessage(
     trustedPeer?: PeerMessageMetadata
 ): StoredMessage {
     content = stripPeerMetadata(content)
-    if (localId && !trustedPeer) localId = externalLocalId(localId)
+    if (localId && !trustedPeer) {
+        // A `peer:` localId is minted by the hub itself (SyncEngine.sendPeerMessage). An
+        // untrusted writer presenting one is replaying the peer message it received —
+        // Codex/Claude reconnect history, transcript backfill — not authoring a new one.
+        // Returning the authenticated row keeps the replay idempotent; externalizing it
+        // would insert an `external:peer:` copy with no ack path that stays queued forever.
+        const echoed = getAuthenticatedPeerMessage(db, sessionId, localId)
+        if (echoed) return echoed
+        localId = externalLocalId(localId)
+    }
     if (trustedPeer && isObject(content)) {
         content = { ...content, meta: { ...(isObject(content.meta) ? content.meta : {}), peer: trustedPeer } }
     }
