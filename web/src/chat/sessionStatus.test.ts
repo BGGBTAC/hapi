@@ -92,20 +92,24 @@ describe('buildSessionStatusData', () => {
         ])
     })
 
-    it('retires unfinished subagent traces once no turn is running, but keeps them while it is', () => {
+    it('retires unfinished Claude subagent traces once no turn is running, but keeps Codex child agents', () => {
         // A Task block without a result after the turn ended is an aborted or
-        // lost trace; nothing can still be driving it. Errors stay visible.
+        // lost trace; nothing can still be driving it. Errors stay visible. A
+        // Codex child agent outlives the parent turn and is closed by its own
+        // agent-run-update, so it must survive `thinking: false` — SessionChat
+        // still offers abort for it via hasAbortableAgentRun.
         const blocks: ChatBlock[] = [
             toolBlock({ name: 'Agent', tool: { id: 'agent-running', state: 'running', input: { description: 'Still tracing' } } }),
-            toolBlock({ name: 'Agent', tool: { id: 'agent-failed', state: 'error', input: { description: 'Broke' } } })
+            toolBlock({ name: 'Agent', tool: { id: 'agent-failed', state: 'error', input: { description: 'Broke' } } }),
+            toolBlock({ name: 'CodexAgent', tool: { id: 'codex-child', state: 'running', input: { summary: 'Child thread' } } })
         ]
 
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [], thinking: true })?.subagents.map((s) => s.id))
-            .toEqual(['agent-running', 'agent-failed'])
+            .toEqual(['agent-running', 'agent-failed', 'codex-child'])
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [], thinking: false })?.subagents.map((s) => s.id))
-            .toEqual(['agent-failed'])
+            .toEqual(['agent-failed', 'codex-child'])
         // Callers without a turn signal keep the previous behaviour.
-        expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })?.subagents).toHaveLength(2)
+        expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })?.subagents).toHaveLength(3)
     })
 
     it('tracks Claude background terminals until their task notification arrives', () => {

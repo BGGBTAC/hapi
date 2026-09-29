@@ -148,6 +148,22 @@ function subagentFromBlock(block: ToolCallBlock): SessionStatusSubagent | null {
     }
 }
 
+/**
+ * A Claude Task/Agent call runs inside one turn: its closing tool result
+ * lands before the turn ends. A block still `running` once no turn is
+ * running (the turn was aborted, the CLI restarted mid-Task or the closing
+ * result never reached the hub) is a lost trace, not live work.
+ *
+ * Codex child agents are never retired here: they outlive the parent turn
+ * and are closed by their own agent-run-update terminal event, which is why
+ * SessionChat keeps the abort button armed for them independently of
+ * `thinking` (`hasAbortableAgentRun`).
+ */
+function isLostSubagentTrace(block: ToolCallBlock, thinking: boolean | undefined): boolean {
+    if (!isSubagentToolName(block.tool.name) || block.tool.state !== 'running') return false
+    return thinking === false
+}
+
 export function buildSessionStatusData(args: {
     goal: ThreadGoal | null | undefined
     tasks: readonly TodoItem[] | null | undefined
@@ -155,9 +171,8 @@ export function buildSessionStatusData(args: {
     messages: readonly NormalizedMessage[]
     backgroundTaskCount?: number
     /**
-     * Whether a turn is running. `false` retires unfinished subagent traces:
-     * nothing can still be driving them, so a Task block without a result is
-     * an aborted or lost trace, not live work. `undefined` keeps them.
+     * Whether a turn is running. `false` retires every unfinished Claude
+     * subagent trace; `undefined` keeps them. See `isLostSubagentTrace`.
      */
     thinking?: boolean
 }): SessionStatusData | null {
@@ -178,9 +193,9 @@ export function buildSessionStatusData(args: {
         goal: args.goal ?? null,
         tasks: args.tasks ? [...args.tasks] : [],
         subagents: tools
+            .filter((block) => !isLostSubagentTrace(block, args.thinking))
             .map(subagentFromBlock)
-            .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)
-            .filter((subagent) => args.thinking !== false || subagent.state !== 'running'),
+            .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
         terminals,
         undiscoveredTerminalCount,
         possibleTerminalCommands
