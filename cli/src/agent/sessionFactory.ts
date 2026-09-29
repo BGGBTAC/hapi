@@ -12,6 +12,7 @@ import { configuration } from '@/configuration'
 import { logger } from '@/ui/logger'
 import { runtimePath } from '@/projectPath'
 import { getInvokedCwd } from '@/utils/invokedCwd'
+import { getProcessStartMarker } from '@/utils/process'
 import { readWorktreeEnv } from '@/utils/worktreeEnv'
 import { CURRENT_MACHINE_CAPABILITIES } from '@hapi/protocol/runnerCapabilities'
 import { exportHapiSessionEnv } from '@/agent/hapiSessionEnv'
@@ -131,6 +132,9 @@ export function buildSessionMetadata(options: {
         happyToolsDir: resolve(happyLibDir, 'tools', 'unpacked'),
         startedFromRunner: options.startedBy === 'runner',
         hostPid: process.pid,
+        // Proves which process generation owns hostPid: the runner adopts an
+        // untracked webhook only when this matches the live PID.
+        hostStartMarker: getProcessStartMarker(process.pid) ?? undefined,
         startedBy: options.startedBy,
         lifecycleState: 'running',
         lifecycleStateSince: now,
