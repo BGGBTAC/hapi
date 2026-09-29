@@ -444,9 +444,9 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
         const invokedAt = Date.now()
-        let sessionUpdatedAt: number
+        let activityAt: number | null
         try {
-            sessionUpdatedAt = store.recordMessagesConsumed(
+            activityAt = store.recordMessagesConsumed(
                 data.sid,
                 localIds,
                 invokedAt,
@@ -457,10 +457,18 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        try {
-            onSessionActivity?.(data.sid, sessionUpdatedAt)
-        } catch (err) {
-            console.error('onSessionActivity failed', err)
+        // A repeat (the CLI re-sends `message` + `messages-consumed` for a
+        // prompt it already consumed, e.g. the Codex history projection on
+        // resume) is dated by the invocation it repeats, not by the row clock:
+        // the keepalive-idle progress clock reads this time (tiann/hapi#1820),
+        // and a rename since must not wake an idle session that did nothing.
+        // `null`: none of the ids is stored here, so there is nothing to date.
+        if (activityAt !== null) {
+            try {
+                onSessionActivity?.(data.sid, activityAt)
+            } catch (err) {
+                console.error('onSessionActivity failed', err)
+            }
         }
 
         // Only drop the queued-thinking grace when the CLI explicitly opts in
