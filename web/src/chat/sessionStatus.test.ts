@@ -46,6 +46,22 @@ function taskNotification(taskId?: string): NormalizedMessage {
     }
 }
 
+function userMessage(
+    createdAt: number,
+    overrides: Partial<Pick<NormalizedMessage, 'invokedAt' | 'isSidechain' | 'steered'>> = {}
+): NormalizedMessage {
+    return {
+        id: `user-${createdAt}`,
+        localId: null,
+        createdAt,
+        role: 'user',
+        isSidechain: false,
+        content: { type: 'text', text: 'Next prompt' },
+        invokedAt: createdAt,
+        ...overrides
+    }
+}
+
 describe('buildSessionStatusData', () => {
     it('returns null when the session has no hidden status', () => {
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks: [], messages: [] })).toBeNull()
@@ -110,6 +126,31 @@ describe('buildSessionStatusData', () => {
             .toEqual(['agent-failed', 'codex-child'])
         // Callers without a turn signal keep the previous behaviour.
         expect(buildSessionStatusData({ goal: null, tasks: [], blocks, messages: [] })?.subagents).toHaveLength(3)
+    })
+
+    it('retires a Claude subagent trace from an earlier turn even while a new turn is running', () => {
+        // `thinking` is a session flag: a lost trace hidden between turns
+        // would come back as "Running · 37h" with every new prompt. A Task
+        // call cannot outlive the turn that made it, so a prompt the CLI
+        // consumed later closes it. Queued, sidechain and steered prompts do
+        // not start a turn; Codex children are not turn-bound at all.
+        const blocks: ChatBlock[] = [
+            toolBlock({ name: 'Task', id: 'block-lost', createdAt: 1_000, tool: { id: 'task-lost', state: 'running', input: { description: 'Old lost trace' } } }),
+            toolBlock({ name: 'CodexAgent', id: 'block-codex', createdAt: 1_000, tool: { id: 'codex-child', state: 'running', input: { summary: 'Child thread' } } }),
+            toolBlock({ name: 'Task', id: 'block-current', createdAt: 6_000, tool: { id: 'task-current', state: 'running', input: { description: 'Current work' } } })
+        ]
+        const subagentIds = (messages: NormalizedMessage[]) =>
+            buildSessionStatusData({ goal: null, tasks: [], blocks, messages, thinking: true })?.subagents.map((s) => s.id)
+
+        expect(subagentIds([userMessage(500)])).toEqual(['task-lost', 'codex-child', 'task-current'])
+        expect(subagentIds([userMessage(500), userMessage(5_000)])).toEqual(['codex-child', 'task-current'])
+        // Rows from a hub that predates `invokedAt` fall back to `createdAt`.
+        expect(subagentIds([userMessage(5_000, { invokedAt: undefined })])).toEqual(['codex-child', 'task-current'])
+        expect(subagentIds([
+            userMessage(5_000, { invokedAt: null }),
+            userMessage(5_000, { isSidechain: true }),
+            userMessage(5_000, { steered: true })
+        ])).toEqual(['task-lost', 'codex-child', 'task-current'])
     })
 
     it('tracks Claude background terminals until their task notification arrives', () => {
