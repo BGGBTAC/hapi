@@ -15,7 +15,7 @@
  */
 
 import { SESSION_LIFECYCLE_IDLE, SESSION_LIFECYCLE_RUNNING } from '@hapi/protocol'
-import type { Session } from '@hapi/protocol/types'
+import type { Metadata, Session } from '@hapi/protocol/types'
 
 /** Keepalive-only for this long ⇒ reconcile `running` → `idle`. */
 export const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000
@@ -44,6 +44,21 @@ export function resolveSessionIdleTimeoutMs(
         return DEFAULT_SESSION_IDLE_TIMEOUT_MS
     }
     return parsed
+}
+
+/**
+ * When the CLI last stamped this session `running`, or `null`.
+ *
+ * The CLI writes `lifecycleState: 'running'` with a fresh `lifecycleStateSince`
+ * exactly once, at bootstrap (cli/src/agent/sessionFactory.ts). For a session
+ * reopened after days of silence that stamp is the only sign of life until the
+ * first turn, so it counts as agent progress at its own time; otherwise the
+ * reopened session reads as idle on the very next tick.
+ */
+export function lifecycleRunningSince(metadata: Metadata | null | undefined): number | null {
+    if (metadata?.lifecycleState !== SESSION_LIFECYCLE_RUNNING) return null
+    const since = metadata.lifecycleStateSince
+    return typeof since === 'number' ? since : null
 }
 
 /** Work the hub can see that must never be reconciled away as a zombie. */

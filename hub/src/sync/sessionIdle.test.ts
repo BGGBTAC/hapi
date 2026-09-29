@@ -437,4 +437,90 @@ describe('SessionCache.reconcileKeepaliveIdle', () => {
         expect(restarted.reconcileKeepaliveIdle(now + 1 * HOUR, window)).toEqual([])
         expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
     })
+
+    it('a reopened days-old session is not marked idle on the first tick', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-1820-reopen-'))
+        try {
+            const dbPath = join(dir, 'hapi.db')
+            const store = new Store(dbPath)
+            const cache = new SessionCache(store, createPublisher([]))
+            const sessionId = cache.getOrCreateSession(
+                'tag-reopen',
+                { path: '/tmp/project', host: 'localhost', flavor: 'claude', lifecycleState: 'running' },
+                null,
+                'default'
+            ).id
+            store.messages.addMessage(sessionId, { role: 'user', content: { type: 'text', text: 'last turn' } }, 'last-turn')
+            const now = Date.now()
+            // The last turn was 80h ago and the CLI archived the session on exit.
+            const exited = store.sessions.getSession(sessionId)!
+            expect(store.sessions.updateSessionMetadata(
+                sessionId,
+                { ...(exited.metadata as Record<string, unknown>), lifecycleState: 'archived', lifecycleStateSince: now - 80 * HOUR, archivedBy: 'cli' },
+                exited.metadataVersion,
+                'default'
+            ).result).toBe('success')
+            const raw = new Database(dbPath)
+            raw.prepare('UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?')
+                .run(now - 80 * HOUR, now - 80 * HOUR, sessionId)
+            raw.prepare('UPDATE messages SET created_at = ?, invoked_at = ? WHERE session_id = ?')
+                .run(now - 80 * HOUR, now - 80 * HOUR, sessionId)
+            raw.close()
+
+            // The hub restarted since and has ticked at least once, so the
+            // progress clock is warm: seeded from the 80h-old turn.
+            const restarted = new SessionCache(store, createPublisher([]))
+            restarted.reloadAll()
+            expect(restarted.reconcileKeepaliveIdle(now - 79 * HOUR, window)).toEqual([])
+
+            // `hapi --existing-session-id`: the CLI bootstraps with a fresh
+            // `running` stamp through the production handler, then starts its
+            // keepalive. It has not said anything yet.
+            const handlers = new Map<string, (payload: unknown, ack?: (response: unknown) => void) => void>()
+            registerSessionHandlers({
+                on: (event: string, handler: (payload: unknown, ack?: (response: unknown) => void) => void) => {
+                    handlers.set(event, handler)
+                },
+                to: () => ({ emit: () => {} })
+            } as never, {
+                store,
+                resolveSessionAccess: (id: string) => {
+                    const stored = store.sessions.getSessionByNamespace(id, 'default')
+                    return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
+                },
+                emitAccessError: () => {},
+                onAgentProgress: (id: string, at: number) => { restarted.recordAgentProgress(id, at) },
+                onWebappEvent: (event: SyncEvent) => {
+                    if (event.type === 'session-updated') restarted.applySessionPatch(event.sessionId, event.data)
+                }
+            } as never)
+            let ack: unknown
+            handlers.get('update-metadata')?.({
+                sid: sessionId,
+                metadata: { path: '/tmp/project', host: 'localhost', flavor: 'claude', lifecycleState: 'running', lifecycleStateSince: now },
+                expectedVersion: store.sessions.getSession(sessionId)!.metadataVersion
+            }, (response) => { ack = response })
+            expect(ack).toMatchObject({ result: 'success' })
+            restarted.handleSessionAlive({ sid: sessionId, time: now })
+            expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+
+            // First tick after the reopen: the process only just started; the
+            // old transcript is not its idleness.
+            expect(restarted.reconcileKeepaliveIdle(now + 5_000, window)).toEqual([])
+            expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+
+            // A hub restart right after the reopen has only the stamp on disk.
+            const again = new SessionCache(store, createPublisher([]))
+            again.reloadAll()
+            again.handleSessionAlive({ sid: sessionId, time: now })
+            expect(again.reconcileKeepaliveIdle(now + 5_000, window)).toEqual([])
+            expect(again.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+
+            // Once the reopened process itself has been quiet for the window,
+            // it is marked like any other.
+            expect(again.reconcileKeepaliveIdle(now + 13 * HOUR, window)).toEqual([sessionId])
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
 })

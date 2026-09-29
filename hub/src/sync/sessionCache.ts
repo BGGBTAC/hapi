@@ -1,12 +1,12 @@
 import { SESSION_LIFECYCLE_IDLE, SESSION_LIFECYCLE_RUNNING } from '@hapi/protocol'
 import { AgentStateSchema, MetadataSchema, SessionPatchSchema, TeamStateSchema } from '@hapi/protocol/schemas'
-import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
+import type { CodexCollaborationMode, CopilotAgentMode, Metadata, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store } from '../store'
 import { clampAliveTime } from './aliveTime'
 import { EventPublisher } from './eventPublisher'
 import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
 import { extractBackgroundTaskDelta } from './backgroundTasks'
-import { resolveSessionIdleTimeoutMs, shouldClearKeepaliveIdle, shouldMarkKeepaliveIdle } from './sessionIdle'
+import { lifecycleRunningSince, resolveSessionIdleTimeoutMs, shouldClearKeepaliveIdle, shouldMarkKeepaliveIdle } from './sessionIdle'
 
 const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
 // tiann/hapi#919: metadata writers (renameSession, clearSessionArchiveMetadata,
@@ -666,8 +666,10 @@ export class SessionCache {
      * A cold cache (hub restart) has observed no progress of its own, so seed
      * it once from disk: the newest stored message (assistant output never
      * moves `updatedAt`, so a session that was streaming a minute before the
-     * restart must not read as hours idle), the todo / team-state clocks, and
-     * for a session that has none of those yet, its creation.
+     * restart must not read as hours idle), the todo / team-state clocks, the
+     * CLI's `running` stamp (a session reopened just before the restart has
+     * nothing else yet) and, for a session that has none of those, its
+     * creation.
      *
      * `updatedAt` is deliberately not consulted, neither as seed nor as a
      * floor. It moves on every CLI `update-metadata` write — a title, a
@@ -681,6 +683,7 @@ export class SessionCache {
             this.store.messages.getNewestMessagePosition(sessionId)?.at ?? 0,
             session?.todosUpdatedAt ?? 0,
             session?.teamStateUpdatedAt ?? 0,
+            lifecycleRunningSince(session?.metadata as Metadata | null | undefined) ?? 0,
             session?.createdAt ?? 0
         )
         this.agentProgressAtBySessionId.set(sessionId, seeded)
