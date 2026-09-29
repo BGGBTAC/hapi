@@ -46,16 +46,39 @@ function session(overrides: Partial<Session> = {}): Session {
 }
 
 describe('resolveSessionIdleTimeoutMs', () => {
+    const quiet = () => {}
+
     it('defaults when unset or unparseable', () => {
-        expect(resolveSessionIdleTimeoutMs({})).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '  ' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: 'soon' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '-1' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({}, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '  ' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: 'soon' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '-1' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
     })
 
     it('honours an explicit window, and 0 disables', () => {
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' })).toBe(3_600_000)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '0' })).toBe(0)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' }, quiet)).toBe(3_600_000)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: ' 3600000 ' }, quiet)).toBe(3_600_000)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '0' }, quiet)).toBe(0)
+    })
+
+    it('refuses a suffixed value instead of reading "1h" as 1 ms, and says so', () => {
+        // parseInt("1h") === 1 would turn every quiet session idle on the
+        // next 5 s tick — a plausible operator typo with a drastic effect.
+        const warnings: string[] = []
+        const warn = (message: string) => { warnings.push(message) }
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '1h' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '12h' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '1e3' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '+5' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(warnings).toHaveLength(4)
+        expect(warnings[0]).toContain('"1h"')
+        expect(warnings[0]).toContain('whole milliseconds')
+    })
+
+    it('stays silent on a valid value', () => {
+        const warnings: string[] = []
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' }, (m) => { warnings.push(m) })).toBe(3_600_000)
+        expect(warnings).toEqual([])
     })
 })
 

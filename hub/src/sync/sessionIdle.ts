@@ -23,16 +23,23 @@ export const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000
 /**
  * `HAPI_SESSION_IDLE_TIMEOUT_MS` window, in ms. `0` disables reconciliation
  * entirely; an unset or unparseable value falls back to the default.
+ *
+ * Whole milliseconds only. `parseInt` would read "1h" as 1 ms and quietly
+ * mark every session idle on the next tick, so a value with a suffix (or
+ * anything else that is not a plain digit string) is refused, and loudly.
  */
 export function resolveSessionIdleTimeoutMs(
-    env: Record<string, string | undefined> = process.env
+    env: Record<string, string | undefined> = process.env,
+    warn: (message: string) => void = (message) => console.warn(message)
 ): number {
     const raw = env.HAPI_SESSION_IDLE_TIMEOUT_MS
     if (raw === undefined || raw.trim() === '') {
         return DEFAULT_SESSION_IDLE_TIMEOUT_MS
     }
-    const parsed = Number.parseInt(raw.trim(), 10)
-    if (!Number.isFinite(parsed) || parsed < 0) {
+    const trimmed = raw.trim()
+    const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN
+    if (!Number.isSafeInteger(parsed)) {
+        warn(`[session-idle] Ignoring HAPI_SESSION_IDLE_TIMEOUT_MS=${JSON.stringify(raw)}: expected whole milliseconds (e.g. 3600000 for 1h); using the default ${DEFAULT_SESSION_IDLE_TIMEOUT_MS}`)
         return DEFAULT_SESSION_IDLE_TIMEOUT_MS
     }
     return parsed
