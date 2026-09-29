@@ -1181,6 +1181,10 @@ export class SyncEngine {
 
     async abortSession(sessionId: string): Promise<void> {
         await this.rpcGateway.abortSession(sessionId)
+        // The CLI answered: its agent process tree (background shells
+        // included) is going down, so no task notification will close the
+        // counter any more.
+        this.sessionCache.clearBackgroundTasks(sessionId)
     }
 
     private assertConversationHistoryIdle(session: Session): void {

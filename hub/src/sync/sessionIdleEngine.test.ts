@@ -1,6 +1,8 @@
-import { describe, expect, it, setSystemTime } from 'bun:test'
+import { describe, expect, it, mock, setSystemTime } from 'bun:test'
+import type { SyncEvent } from '@hapi/protocol/types'
 import { Store } from '../store'
 import { RpcRegistry } from '../socket/rpcRegistry'
+import type { SessionCache } from './sessionCache'
 import { SyncEngine } from './syncEngine'
 
 /**
@@ -66,5 +68,42 @@ describe('SyncEngine keepalive-idle tick', () => {
                 engine.stop()
             }
         })
+    })
+
+    it('abort forgets background tasks so the session can reconcile idle', async () => {
+        const { engine } = createEngine()
+        try {
+            const session = engine.getOrCreateSession('abort', RUNNING, null, 'default')
+            engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: true })
+            engine.handleBackgroundTaskDelta(session.id, { started: 1, completed: 0 })
+            engine.handleSessionAlive({ sid: session.id, time: Date.now(), thinking: false })
+            expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(1)
+            const cache = (engine as unknown as { sessionCache: SessionCache }).sessionCache
+            const later = Date.now() + 87 * HOUR
+            // A counter that can never be closed pins the session on "working".
+            expect(cache.reconcileKeepaliveIdle(later, 12 * HOUR)).toEqual([])
+            // Web clients have rendered the counter and only a `session-updated`
+            // patch takes it back (the alive broadcast does not carry it).
+            const events: SyncEvent[] = []
+            engine.subscribe((event) => { events.push(event) })
+            const cleared = () => events.filter((e) => e.type === 'session-updated' && e.data?.backgroundTaskCount === 0)
+
+            const gateway = (engine as unknown as { rpcGateway: { abortSession: unknown } }).rpcGateway
+            // The CLI refuses (no handler): nothing was killed, keep the count.
+            gateway.abortSession = mock(async () => { throw new Error('handler-not-registered') })
+            await expect(engine.abortSession(session.id)).rejects.toThrow()
+            expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(1)
+            expect(cleared()).toHaveLength(0)
+
+            // The CLI acknowledged: its process tree, background shells
+            // included, is gone and no <task-notification> will follow.
+            gateway.abortSession = mock(async () => {})
+            await engine.abortSession(session.id)
+            expect(engine.getSession(session.id)?.backgroundTaskCount).toBe(0)
+            expect(cleared()).toHaveLength(1)
+            expect(cache.reconcileKeepaliveIdle(later, 12 * HOUR)).toEqual([session.id])
+        } finally {
+            engine.stop()
+        }
     })
 })

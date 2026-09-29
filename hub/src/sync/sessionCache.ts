@@ -566,6 +566,25 @@ export class SessionCache {
         }
     }
 
+    /**
+     * Abort tree-kills the agent process and every background shell under it
+     * (cli/src/claude/sdk/query.ts cleanup), so the `<task-notification>` that
+     * would have closed the counter can never arrive. Forget the tasks, or the
+     * session reads as "working" until session-end and never reconciles idle
+     * (tiann/hapi#1820).
+     */
+    clearBackgroundTasks(sessionId: string): void {
+        const session = this.sessions.get(sessionId)
+        if (!session || (session.backgroundTaskCount ?? 0) === 0) return
+
+        session.backgroundTaskCount = 0
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId,
+            data: { backgroundTaskCount: 0 } satisfies SessionPatch
+        })
+    }
+
     applyBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
         const session = this.sessions.get(sessionId)
         if (!session) return
