@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SessionListScrollAnchor } from './SessionListScrollAnchor'
 import type { SessionSummary } from '@/types/api'
+import { SESSION_LIFECYCLE_IDLE } from '@hapi/protocol'
+import { isLiveSession, sessionLivenessRank } from '@/lib/sessionLiveness'
 import type { ApiClient } from '@/api/client'
 import {
     buildSessionSearchScoreIndex,
@@ -78,9 +80,55 @@ const RUNNING_BUCKETS = [
     { key: 'working', labelKey: 'session.item.running', colorClass: 'text-[var(--app-badge-success-text)]', pulse: true },
     { key: 'pending', labelKey: 'session.item.pending', colorClass: 'text-[var(--app-badge-warning-text)]', pulse: true },
     { key: 'active', labelKey: 'session.item.active', colorClass: 'text-[var(--app-hint)]', pulse: false },
+    // tiann/hapi#1820: connected, but the hub has seen nothing except
+    // keepalives for the configured window. Split out so a fleet of zombies
+    // does not read as a fleet of ready sessions.
+    { key: 'idle', labelKey: 'session.item.idle', colorClass: 'text-[var(--app-hint)]', pulse: false },
 ] as const
 
 type RunningBucketKey = (typeof RUNNING_BUCKETS)[number]['key']
+
+export function emptyRunningBuckets(): Record<RunningBucketKey, SessionSummary[]> {
+    return { working: [], pending: [], active: [], idle: [] }
+}
+
+/**
+ * Split the connected sessions into the in-progress / active sub-buckets the
+ * pinned sections render. Pure so the bucketing rules stay testable.
+ */
+export function bucketRunningSessions(
+    sessions: SessionSummary[],
+    pinInProgressSessions: boolean,
+    compare: (a: SessionSummary, b: SessionSummary) => number = (a, b) => b.updatedAt - a.updatedAt
+): Record<RunningBucketKey, SessionSummary[]> {
+    const buckets = emptyRunningBuckets()
+    if (!pinInProgressSessions) {
+        return buckets
+    }
+    for (const session of sessions) {
+        if (session.globalPinned || session.pinned) {
+            continue
+        }
+        if (!session.active) {
+            continue
+        }
+        if (session.thinking || (session.backgroundTaskCount ?? 0) > 0) {
+            buckets.working.push(session)
+        } else if ((session.pendingRequestsCount ?? 0) > 0) {
+            buckets.pending.push(session)
+        } else if (session.metadata?.lifecycleState === SESSION_LIFECYCLE_IDLE) {
+            // Keepalive-only: socket up, no agent progress for hours.
+            buckets.idle.push(session)
+        } else {
+            // Quiet but connected: finished executing, operator will continue.
+            buckets.active.push(session)
+        }
+    }
+    for (const key of Object.keys(buckets) as RunningBucketKey[]) {
+        buckets[key].sort(compare)
+    }
+    return buckets
+}
 
 /**
  * Sessions that warrant the optional pinned top sections.
@@ -216,8 +264,11 @@ export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selecte
 
     for (const group of byAgentId.values()) {
         group.sort((a, b) => {
-            // Active session always wins — it's the live connection
-            if (a.active !== b.active) return a.active ? -1 : 1
+            // Live session always wins — it's the live connection; a
+            // keepalive-idle one still beats a disconnected duplicate.
+            const rankA = sessionLivenessRank(a)
+            const rankB = sessionLivenessRank(b)
+            if (rankA !== rankB) return rankA - rankB
             // Among inactive duplicates, keep the selected one visible
             if (a.id === selectedSessionId) return -1
             if (b.id === selectedSessionId) return 1
@@ -302,10 +353,15 @@ function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
 
     return Array.from(groups.entries())
         .map(([key, group]) => {
+            // Keepalive-idle rows (tiann/hapi#1820) rank between live and
+            // disconnected: still connected, but not something to act on.
+            const rank = (s: SessionSummary): number => isLiveSession(s)
+                ? (s.pendingRequestsCount > 0 ? 0 : 1)
+                : s.active ? 2 : 3
             const sortedSessions = [...group.sessions].sort((a, b) => {
                 if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1
-                const rankA = a.active ? (a.pendingRequestsCount > 0 ? 0 : 1) : 2
-                const rankB = b.active ? (b.pendingRequestsCount > 0 ? 0 : 1) : 2
+                const rankA = rank(a)
+                const rankB = rank(b)
                 if (rankA !== rankB) return rankA - rankB
                 return b.updatedAt - a.updatedAt
             })
@@ -313,7 +369,10 @@ function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
                 (max, s) => (s.updatedAt > max ? s.updatedAt : max),
                 -Infinity
             )
-            const hasActiveSession = group.sessions.some(s => s.active)
+            // Drives group order and auto-expand: a directory whose only
+            // connected session is a keepalive zombie should not float up
+            // or stay open on that account.
+            const hasActiveSession = group.sessions.some(isLiveSession)
             const hasPinnedSession = group.sessions.some(s => s.pinned)
             const displayName = getPathDisplayName(group.directory)
 
@@ -1332,45 +1391,17 @@ export function SessionList(props: {
         return [...pinned].sort((a, b) => b.updatedAt - a.updatedAt)
     }, [machineFilteredSessions, searchScoreIndex, hasTextQuery])
     const runningSessions = useMemo(() => {
-        const buckets: Record<RunningBucketKey, SessionSummary[]> = {
-            working: [],
-            pending: [],
-            active: [],
-        }
-        if (!pinInProgressSessions) {
-            return buckets
-        }
-        for (const session of machineFilteredSessions) {
-            if (session.globalPinned || session.pinned) {
-                continue
-            }
-            if (!session.active) {
-                continue
-            }
-            if (session.thinking || (session.backgroundTaskCount ?? 0) > 0) {
-                buckets.working.push(session)
-            } else if ((session.pendingRequestsCount ?? 0) > 0) {
-                buckets.pending.push(session)
-            } else {
-                // Quiet but connected: finished executing, operator will continue.
-                buckets.active.push(session)
-            }
-        }
-        const byRecent = (a: SessionSummary, b: SessionSummary) => b.updatedAt - a.updatedAt
         const byRelevanceOrRecent = (a: SessionSummary, b: SessionSummary) => {
             if (searchScoreIndex && hasTextQuery) {
                 return compareSessionsBySearchRelevance(a, b, searchScoreIndex)
             }
-            return byRecent(a, b)
+            return b.updatedAt - a.updatedAt
         }
-        for (const key of Object.keys(buckets) as RunningBucketKey[]) {
-            buckets[key].sort(byRelevanceOrRecent)
-        }
-        return buckets
+        return bucketRunningSessions(machineFilteredSessions, pinInProgressSessions, byRelevanceOrRecent)
     }, [machineFilteredSessions, pinInProgressSessions, searchScoreIndex, hasTextQuery])
     const runningSessionTotal = runningSessions.working.length
         + runningSessions.pending.length
-    const activeSessionTotal = runningSessions.active.length
+    const activeSessionTotal = runningSessions.active.length + runningSessions.idle.length
     const groups = useMemo(
         () => {
             const grouped = groupSessionsByDirectory(
@@ -2092,7 +2123,7 @@ export function SessionList(props: {
                     onToggle: () => setActiveSectionCollapsed((value) => !value),
                     pulse: false,
                     count: activeSessionTotal,
-                    bucketKeys: ['active'],
+                    bucketKeys: ['active', 'idle'],
                 })}
                 {groups.map(renderDirectoryGroup)}
                 {actionOnlyGroups.map(renderActionOnlyGroupHeader)}

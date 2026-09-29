@@ -93,6 +93,8 @@ export type SessionHandlersDeps = {
     onWebappEvent?: (event: SyncEvent) => void
     onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
+    /** tiann/hapi#1820: any message is agent progress, either direction. */
+    onAgentProgress?: (sessionId: string, at: number) => void
     /** Delegates session-end immediate-queue sweep to the MessageService layer. */
     onSweepImmediateQueued?: (sessionId: string, now: number) => void
     /** Drops the queued-thinking grace so synchronous CLI handlers (e.g. slash
@@ -101,7 +103,7 @@ export type SessionHandlersDeps = {
 }
 
 export function registerSessionHandlers(socket: CliSocketWithData, deps: SessionHandlersDeps): void {
-    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued, onMessagesConsumed } = deps
+    const { store, resolveSessionAccess, emitAccessError, onSessionAlive, onSessionReady, onSessionEnd, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onAgentProgress, onSweepImmediateQueued, onMessagesConsumed } = deps
 
     socket.on('native-queue-message', data => {
         const parsed = z.object({ sid: z.string(), localId: z.string().min(1), text: z.string().nullable() }).safeParse(data)
@@ -152,7 +154,13 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt)
+        const { message: msg, inserted } = store.messages.addMessageWithStatus(sid, content, localId, undefined, createdAt)
+        // A localId the session already stored is a reconnect replay (history
+        // resync, transcript backfill), not new work: no progress clock, no
+        // activity, no todo/team/background-task deltas, no re-broadcast.
+        if (!inserted) {
+            return
+        }
 
         // A reasoning stream arrives as a series of growing snapshots under one
         // stable id, so a stream should cost one row rather than one per
@@ -165,6 +173,11 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         if (reasoningStreamId) {
             store.messages.deleteLiveReasoningSnapshots(sid, reasoningStreamId, msg.id)
         }
+
+        // tiann/hapi#1820: every stored message proves the agent is doing
+        // something, so it refreshes the keepalive-idle clock. Only human
+        // turns additionally bump `updatedAt` (list ordering).
+        onAgentProgress?.(sid, msg.createdAt)
 
         if (shouldRecordSessionActivity(content)) {
             onSessionActivity?.(sid, msg.createdAt)

@@ -12,6 +12,7 @@ import { getCodexImportedAt } from '@/lib/codexImportedSessions'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { useTranslation } from '@/lib/use-translation'
 import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
+import { isKeepaliveIdle, isLiveSession } from '@/lib/sessionLiveness'
 
 function LoaderIcon(props: { className?: string }) {
     return (
@@ -165,11 +166,11 @@ export function SessionRowSummary(props: {
 
     return (
         <div className={`flex w-full min-w-0 flex-col gap-1 ${className ?? ''}`}>
-            <div className={`grid grid-cols-[minmax(9rem,1fr)_minmax(0,max-content)] items-center gap-2 ${!s.active ? 'opacity-50' : ''}`}>
+            <div className={`grid grid-cols-[minmax(9rem,1fr)_minmax(0,max-content)] items-center gap-2 ${!s.active ? 'opacity-50' : isKeepaliveIdle(s) ? 'opacity-75' : ''}`}>
                 <div className="flex min-w-0 items-center gap-2">
                     <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4 shrink-0 -translate-y-px" />
                     <div
-                        className={`min-w-0 flex-1 truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
+                        className={`min-w-0 flex-1 truncate text-sm font-medium ${isLiveSession(s) ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
                         title={sessionName}
                     >
                         {sessionName}
@@ -233,6 +234,20 @@ export function SessionRowSummary(props: {
                             <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />
                             {!inRunningSection ? (
                                 <span className="text-[11px] font-medium leading-none">{t('session.item.pending')}</span>
+                            ) : null}
+                        </span>
+                    ) : isKeepaliveIdle(s) ? (
+                        // tiann/hapi#1820: connected, but keepalives only. The
+                        // pinned idle bucket already carries the label, so
+                        // rows in there get the dot alone.
+                        <span
+                            className="inline-flex shrink-0 items-center gap-1 text-[var(--app-hint)]"
+                            title={t('session.item.idle')}
+                            data-testid="session-row-idle"
+                        >
+                            <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+                            {!inRunningSection ? (
+                                <span className="text-[11px] font-medium leading-none">{t('session.item.idle')}</span>
                             ) : null}
                         </span>
                     ) : attention && nestedTooltips && attentionId ? (

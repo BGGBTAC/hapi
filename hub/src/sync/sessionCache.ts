@@ -1,3 +1,4 @@
+import { SESSION_LIFECYCLE_IDLE, SESSION_LIFECYCLE_RUNNING } from '@hapi/protocol'
 import { AgentStateSchema, MetadataSchema, SessionPatchSchema, TeamStateSchema } from '@hapi/protocol/schemas'
 import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store } from '../store'
@@ -5,6 +6,7 @@ import { clampAliveTime } from './aliveTime'
 import { EventPublisher } from './eventPublisher'
 import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
 import { extractBackgroundTaskDelta } from './backgroundTasks'
+import { resolveSessionIdleTimeoutMs, shouldClearKeepaliveIdle, shouldMarkKeepaliveIdle } from './sessionIdle'
 
 const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
 // tiann/hapi#919: metadata writers (renameSession, clearSessionArchiveMetadata,
@@ -22,6 +24,15 @@ export class SessionCache {
     private readonly deduplicatePending: Set<string> = new Set()
     private readonly pendingThinkingUntilBySessionId: Map<string, number> = new Map()
     private readonly runtimeConfigUpdatedAtBySessionId: Map<string, Partial<Record<RuntimeConfigKey, number>>> = new Map()
+    /**
+     * Last time the hub saw real agent progress per session (tiann/hapi#1820).
+     * Deliberately NOT bumped by `session-alive`: keepalives are exactly the
+     * signal this clock has to be immune to. Seeded lazily from the durable
+     * progress records on disk (see `getAgentProgressAt`), so a hub restart
+     * re-derives it without trusting `updatedAt`.
+     */
+    private readonly agentProgressAtBySessionId: Map<string, number> = new Map()
+    private readonly sessionIdleTimeoutMs: number = resolveSessionIdleTimeoutMs()
 
     constructor(
         private readonly store: Store,
@@ -129,6 +140,7 @@ export class SessionCache {
             const existed = this.sessions.delete(sessionId)
             this.pendingThinkingUntilBySessionId.delete(sessionId)
             this.runtimeConfigUpdatedAtBySessionId.delete(sessionId)
+            this.agentProgressAtBySessionId.delete(sessionId)
             if (existed) {
                 this.publisher.emit({ type: 'session-removed', sessionId })
             }
@@ -515,6 +527,7 @@ export class SessionCache {
         if (!wasThinking) session.activeTurnStartedAt = activeTurnStartedAt
         session.updatedAt = Math.max(session.updatedAt, nextTime)
         this.pendingThinkingUntilBySessionId.set(session.id, nextTime + QUEUED_MESSAGE_THINKING_GRACE_MS)
+        this.recordAgentProgress(session.id, nextTime)
 
         if (!wasThinking || session.updatedAt !== previousUpdatedAt) {
             this.lastBroadcastAtBySessionId.set(session.id, Date.now())
@@ -530,6 +543,25 @@ export class SessionCache {
         }
     }
 
+    /**
+     * Abort tree-kills the agent process and every background shell under it
+     * (cli/src/claude/sdk/query.ts cleanup), so the `<task-notification>` that
+     * would have closed the counter can never arrive. Forget the tasks, or the
+     * session reads as "working" until session-end and never reconciles idle
+     * (tiann/hapi#1820).
+     */
+    clearBackgroundTasks(sessionId: string): void {
+        const session = this.sessions.get(sessionId)
+        if (!session || (session.backgroundTaskCount ?? 0) === 0) return
+
+        session.backgroundTaskCount = 0
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId,
+            data: { backgroundTaskCount: 0 } satisfies SessionPatch
+        })
+    }
+
     applyBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
         const session = this.sessions.get(sessionId)
         if (!session) return
@@ -539,6 +571,7 @@ export class SessionCache {
         if (next === prev) return
 
         session.backgroundTaskCount = next
+        this.recordAgentProgress(sessionId)
         this.publisher.emit({
             type: 'session-updated',
             sessionId,
@@ -557,6 +590,10 @@ export class SessionCache {
         }
 
         const nextUpdatedAt = Math.max(stored.updatedAt, updatedAt)
+        // Progress is the activity's own time, not the floored row clock: a history
+        // replay carrying an old timestamp must not wake an idle session just because
+        // some metadata write moved `updatedAt` since.
+        this.recordAgentProgress(sessionId, updatedAt)
         const touched = this.store.sessions.touchSessionUpdatedAt(sessionId, nextUpdatedAt, stored.namespace)
         const session = this.sessions.get(sessionId)
 
@@ -578,6 +615,117 @@ export class SessionCache {
             namespace: session.namespace,
             data: { updatedAt: session.updatedAt } satisfies SessionPatch
         })
+    }
+
+    /**
+     * tiann/hapi#1820: record real agent progress (a message in either
+     * direction, a queued prompt, a background task starting). This is the
+     * clock `reconcileKeepaliveIdle` reads — `session-alive` must never reach
+     * it, otherwise a heartbeating-but-dead session looks healthy forever.
+     *
+     * Pure bookkeeping on purpose: the lifecycle write is left to the tick so
+     * this is safe to call from anywhere holding a cached Session reference
+     * (`refreshSession` replaces the cached object).
+     */
+    recordAgentProgress(sessionId: string, at: number = Date.now()): void {
+        if (!Number.isFinite(at)) return
+        const previous = this.agentProgressAtBySessionId.get(sessionId) ?? 0
+        if (at > previous) {
+            this.agentProgressAtBySessionId.set(sessionId, at)
+        }
+    }
+
+    /**
+     * A cold cache (hub restart) has observed no progress of its own, so seed
+     * it once from disk: the newest stored message (assistant output never
+     * moves `updatedAt`, so a session that was streaming a minute before the
+     * restart must not read as hours idle), the todo / team-state clocks, and
+     * for a session that has none of those yet, its creation.
+     *
+     * `updatedAt` is deliberately not consulted, neither as seed nor as a
+     * floor. It moves on every CLI `update-metadata` write — a title, a
+     * summary, the idle mark itself echoed back after a version mismatch —
+     * and none of that is agent progress; reading it here lifted the mark on
+     * the very next tick and let a zombie hide behind its metadata churn.
+     */
+    private getAgentProgressAt(session: Session): number {
+        let observed = this.agentProgressAtBySessionId.get(session.id)
+        if (observed === undefined) {
+            observed = Math.max(
+                this.store.messages.getNewestMessagePosition(session.id)?.at ?? 0,
+                session.todosUpdatedAt ?? 0,
+                session.teamStateUpdatedAt ?? 0,
+                session.createdAt
+            )
+            this.agentProgressAtBySessionId.set(session.id, observed)
+        }
+        return observed
+    }
+
+    /**
+     * tiann/hapi#1820: reconcile `lifecycleState` for sessions that only the
+     * keepalive is keeping alive. Runs on the existing inactivity tick.
+     *
+     * `active` is deliberately left alone: the CLI socket really is up, and
+     * flipping `active` would make `resumeSession` spawn a second agent
+     * against a live process (and would unlock dedup-merge / delete on it).
+     * What changes is the honest agent-health signal, which operators, the
+     * session list and downstream tooling can act on.
+     *
+     * Returns the session ids newly marked `idle`.
+     */
+    reconcileKeepaliveIdle(now: number = Date.now(), timeoutMs: number = this.sessionIdleTimeoutMs): string[] {
+        const marked: string[] = []
+        // Snapshot: a lifecycle write refreshes the cached Session in place.
+        // A disabled window (`timeoutMs <= 0`) never marks, but still walks
+        // the sessions so marks left by an earlier configuration get lifted.
+        for (const session of Array.from(this.sessions.values())) {
+            const progressAt = timeoutMs > 0 ? this.getAgentProgressAt(session) : 0
+            if (shouldClearKeepaliveIdle(session, progressAt, now, timeoutMs)) {
+                this.writeLifecycleState(session.id, SESSION_LIFECYCLE_RUNNING)
+                continue
+            }
+            if (!shouldMarkKeepaliveIdle(session, progressAt, now, timeoutMs)) {
+                continue
+            }
+            if (this.writeLifecycleState(session.id, SESSION_LIFECYCLE_IDLE)) {
+                marked.push(session.id)
+            }
+        }
+        return marked
+    }
+
+    /**
+     * Swap `metadata.lifecycleState` between `running` and `idle`, retrying on
+     * version-mismatch like the other hub-side metadata writers. Best effort:
+     * a session whose CLI is concurrently rewriting metadata just gets
+     * reconciled on a later tick.
+     */
+    private writeLifecycleState(sessionId: string, next: typeof SESSION_LIFECYCLE_RUNNING | typeof SESSION_LIFECYCLE_IDLE): boolean {
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId)
+            const current = session?.metadata
+            if (!session || !current) return false
+            if (current.lifecycleState === next) return false
+            // Only the running <-> idle pair is ours; never step on `archived`
+            // or any CLI-authored state.
+            const expected = next === SESSION_LIFECYCLE_IDLE ? SESSION_LIFECYCLE_RUNNING : SESSION_LIFECYCLE_IDLE
+            if (current.lifecycleState !== expected) return false
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                { ...current, lifecycleState: next, lifecycleStateSince: Date.now() },
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+            if (result.result === 'error') return false
+            // refreshSession re-reads the row and broadcasts the full session,
+            // so clients pick up the new lifecycleState without a second emit.
+            this.refreshSession(sessionId)
+            if (result.result === 'success') return true
+        }
+        return false
     }
 
     /**
@@ -1081,6 +1229,7 @@ export class SessionCache {
         this.lastBroadcastAtBySessionId.delete(sessionId)
         this.todoBackfillAttemptedSessionIds.delete(sessionId)
         this.pendingThinkingUntilBySessionId.delete(sessionId)
+        this.agentProgressAtBySessionId.delete(sessionId)
 
         void import('../scratchlistAttachments/storage').then(async ({
             deleteScratchlistAttachmentFiles,
@@ -1330,6 +1479,13 @@ export class SessionCache {
             }
             this.lastBroadcastAtBySessionId.delete(oldSessionId)
             this.todoBackfillAttemptedSessionIds.delete(oldSessionId)
+            // The merged history is the new row's progress too — carry the
+            // clock over so a resume-rotated id does not start out stale.
+            const oldProgressAt = this.agentProgressAtBySessionId.get(oldSessionId)
+            if (oldProgressAt !== undefined) {
+                this.recordAgentProgress(newSessionId, oldProgressAt)
+            }
+            this.agentProgressAtBySessionId.delete(oldSessionId)
         } else {
             this.refreshSession(oldSessionId)
         }

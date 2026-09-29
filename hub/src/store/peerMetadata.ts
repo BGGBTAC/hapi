@@ -40,3 +40,14 @@ export class PeerMessageAccessError extends Error {
 export function externalLocalId(localId: string): string {
     return /^(external:)*peer:/.test(localId) ? `external:${localId}` : localId
 }
+
+/**
+ * The hub-minted `peer:<sender>:<id>` behind a localId an untrusted writer presents,
+ * with any `external:` prefixes from earlier externalization stripped; null when the
+ * id was never a peer id. Used to recognise a CLI replaying a peer message it received
+ * (reconnect history, transcript backfill) so it is not queued a second time.
+ */
+export function hubPeerLocalId(localId: string): string | null {
+    const base = localId.replace(/^(external:)+/, '')
+    return base.startsWith('peer:') ? base : null
+}

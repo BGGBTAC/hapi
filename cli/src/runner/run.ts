@@ -33,6 +33,7 @@ import { scheduleCursorModelsPrewarm } from '@/modules/common/cursorModelsPrewar
 import { isLinkedGitWorktree } from '@/utils/isLinkedGitWorktree';
 import { agentUnavailableMessage, getAgentAvailability } from '@/agent/agentAvailability';
 import { copyCodexConfigFile, resolveCodexHome } from '@/codex/utils/codexHome';
+import { decideUntrackedRunnerWebhook } from './lateRunnerWebhook';
 
 /**
  * Deduplicates a preallocated HAPI-row spawn only while its child is alive.
@@ -400,6 +401,11 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     // Session spawning awaiter system
     const pidToAwaiter = new Map<number, (session: TrackedSession) => void>();
     const pidToErrorAwaiter = new Map<number, (errorMessage: string) => void>();
+    // PIDs whose spawn this runner generation timed out (tree-killed at the
+    // source). A webhook from one of these is a ghost; any other untracked
+    // `startedBy: 'runner'` webhook is a child of the previous generation and
+    // gets adopted instead (see onHappySessionWebhook).
+    const webhookTimeoutOrphanPids = new Set<number>();
     // existingSessionId identifies the HAPI row, not a permanent spawn request.
     // Keep the dedupe entry only while this runner still owns the child PID.
     const existingSessionIdByChildPid = new Map<number, string>();
@@ -508,6 +514,24 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         if (persisted) {
           persisted.confirmedSessionId = sessionId;
           persistResumeProcesses();
+        } else {
+          // A fresh spawn has no HAPI id to reserve (the hub only passes one
+          // for resume), so nothing was persisted at spawn time. Now that the
+          // webhook names the row, keep the durable PID record: it is what a
+          // restarted runner lists, stops (generation-checked) and re-confirms
+          // after /clear. Without it the child is invisible and unstoppable.
+          const processStartMarker = getProcessStartMarker(pid);
+          if (processStartMarker) {
+            const requestedSessionId = existingSession.requestedHappySessionId ?? sessionId;
+            persistedResumeProcesses.set(pid, {
+              requestedSessionId,
+              confirmedSessionId: sessionId,
+              pid,
+              processStartMarker
+            });
+            pidToRequestedSessionId.set(pid, requestedSessionId);
+            persistResumeProcesses();
+          }
         }
         existingSession.happySessionMetadataFromLocalWebhook = sessionMetadata;
         logger.debug(`[RUNNER RUN] Updated runner-spawned session ${sessionId} with metadata`);
@@ -532,22 +556,65 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
         // anything claiming `'runner'` here must be the second case and
         // should be ignored + terminated instead of silently promoted.
         if (sessionMetadata.startedBy === 'runner') {
+          const timedOutByThisRunner = webhookTimeoutOrphanPids.has(pid);
+          webhookTimeoutOrphanPids.delete(pid);
+          const decision = decideUntrackedRunnerWebhook({
+            concurrentClients: Boolean(sessionMetadata.capabilities?.concurrentClients),
+            timedOutByThisRunner
+          });
+          if (decision === 'kill') {
+            logger.debug(
+              `[RUNNER RUN] Ignoring late webhook from orphaned runner-spawned PID ${pid} (session ${sessionId}). Terminating child.`
+            );
+            // Use killProcess (SIGTERM → SIGKILL escalation) rather than a
+            // bare process.kill() so the orphan is reliably reaped even if
+            // it ignores SIGTERM.  We don't have a ChildProcess reference
+            // here (tracking entry was already removed by the timeout
+            // handler), so tree-kill via killProcessByChildProcess is not
+            // available — but the timeout handler should have already
+            // tree-killed the process group; this is defence-in-depth.
+            void killProcess(pid);
+            return;
+          }
           // A shared root can report /new after a Runner restart. Unknown is
-          // not proof of an orphan: never kill its sibling roots. Known spawn
-          // timeouts already terminate their ChildProcess tree at the source.
-          // No registry scan/adoption lifecycle is needed for live attachment.
+          // not proof of an orphan: never kill its sibling roots. Live
+          // attachment goes through the runtime registry, no adoption needed.
           if (sessionMetadata.capabilities?.concurrentClients) return;
-          logger.debug(
-            `[RUNNER RUN] Ignoring late webhook from orphaned runner-spawned PID ${pid} (session ${sessionId}). Terminating child.`
-          );
-          // Use killProcess (SIGTERM → SIGKILL escalation) rather than a
-          // bare process.kill() so the orphan is reliably reaped even if
-          // it ignores SIGTERM.  We don't have a ChildProcess reference
-          // here (tracking entry was already removed by the timeout
-          // handler), so tree-kill via killProcessByChildProcess is not
-          // available — but the timeout handler should have already
-          // tree-killed the process group; this is defence-in-depth.
-          void killProcess(pid);
+          // A child of the previous runner generation whose webhook landed
+          // after the restart (or a spawn still in flight during it). Adopt
+          // it as a recovered child: the persisted record is what /list, a
+          // generation-checked stopSession and the next webhook after /clear
+          // all key off — the same path a resume-spawned child takes.
+          const processStartMarker = getProcessStartMarker(pid);
+          if (!processStartMarker) {
+            // Cannot pin the generation: a reused PID must never be killed on
+            // this session's behalf. Leave it untracked (stop reports still_alive).
+            logger.debug(`[RUNNER RUN] Cannot verify process generation for untracked runner-spawned PID ${pid} (session ${sessionId}); not adopting`);
+            return;
+          }
+          // The webhook may be late: if the PID was reused since, storing the
+          // current marker would let a later stopSession pass the generation
+          // check and kill a foreign process tree — even another runner-spawned
+          // CLI. Only the reporting process's own marker proves the generation;
+          // a webhook without one (older CLI) is left untracked.
+          if (sessionMetadata.hostStartMarker !== processStartMarker) {
+            logger.debug(`[RUNNER RUN] Untracked runner-spawned PID ${pid} (session ${sessionId}) is not the reporting process generation; not adopting`);
+            return;
+          }
+          persistedResumeProcesses.set(pid, {
+            requestedSessionId: sessionId,
+            confirmedSessionId: sessionId,
+            pid,
+            processStartMarker
+          });
+          pidToRequestedSessionId.set(pid, sessionId);
+          pidToConfirmedSessionId.set(pid, sessionId);
+          invalidateVerifiedExit(sessionId);
+          invalidateVerifiedExit(`PID-${pid}`);
+          existingSessionIdByChildPid.set(pid, sessionId);
+          spawnSession.recoverChild(sessionId, { type: 'success', sessionId });
+          persistResumeProcesses();
+          logger.debug(`[RUNNER RUN] Adopted untracked runner-spawned session ${sessionId} (PID ${pid}) after runner restart`);
           return;
         }
 
@@ -939,8 +1006,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
             // Remove the tracked session entry so a late-arriving webhook
             // from this orphaned PID cannot be silently promoted into a
-            // ghost session by onHappySessionWebhook().
+            // ghost session by onHappySessionWebhook(); stamp the PID so
+            // that webhook is told apart from a restart-era adoption.
             pidToTrackedSession.delete(pid);
+            webhookTimeoutOrphanPids.add(pid);
 
             // Terminate the entire process tree (wrapper + agent
             // grandchildren).  Using killProcessByChildProcess instead of
@@ -1214,6 +1283,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
       pidToErrorAwaiter.delete(pid);
       pidToRequestedSessionId.delete(pid);
       pidToConfirmedSessionId.delete(pid);
+      webhookTimeoutOrphanPids.delete(pid);
       if (persistedResumeProcesses.delete(pid)) persistResumeProcesses();
     };
 

@@ -850,7 +850,7 @@ export class MessageService {
             deliveryMode?: MessageDeliveryMode
         },
         trustedPeer?: PeerMessageMetadata
-    ): Promise<{ actualSessionId: string; createdAt: number; messageId: string; localId: string | null }> {
+    ): Promise<{ actualSessionId: string; createdAt: number; messageId: string; localId: string | null; inserted: boolean; invokedAt: number | null }> {
         // Defence-in-depth invariant for non-REST callers (Telegram bot, MCP,
         // internal callers).  Attachment paths live under the CLI session's
         // upload directory which `cleanupUploadDir` purges on session end; a
@@ -944,7 +944,7 @@ export class MessageService {
                 ...(msg.deliveryState ? { deliveryState: msg.deliveryState } : {})
             }
         })
-        return { actualSessionId, createdAt: msg.createdAt, messageId: msg.id, localId: msg.localId }
+        return { actualSessionId, createdAt: msg.createdAt, messageId: msg.id, localId: msg.localId, inserted: inserted.inserted, invokedAt: msg.invokedAt }
     }
 
     /**

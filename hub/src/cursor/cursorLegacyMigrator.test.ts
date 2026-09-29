@@ -470,6 +470,18 @@ describe('CursorLegacyMigrator.migrateOne — refusals', () => {
         if (!out.ok) expect(out.reason).toBe('running_refused')
     })
 
+    // tiann/hapi#1820: an idle-marked row still has a live CLI behind it.
+    // Reading 'idle' as a dead row would let the migrator transplant the ACP
+    // session directory out from under a running Cursor runner.
+    it('refuses sessions whose lifecycleState is "idle" without forceArchiveRunning', async () => {
+        const session = h.makeSession({
+            metadata: { path: '/x', host: 'h', flavor: 'cursor', cursorSessionId: 'u', lifecycleState: 'idle' }
+        })
+        const out = await makeMigrator(h, null).migrateOne(session, {})
+        expect(out.ok).toBe(false)
+        if (!out.ok) expect(out.reason).toBe('running_refused')
+    })
+
     it('refuses sessions where session.active=true even without lifecycleState (Codex #34 P2)', async () => {
         const session = h.makeSession({
             active: true,
@@ -1176,6 +1188,24 @@ describe('CursorLegacyMigrator.migrateOne — rollback paths', () => {
         expect(out.ok).toBe(false)
         if (out.ok) return
         expect(out.reason).toBe('session_resumed_during_migrate')
+    })
+
+    it('also refuses the resume-race recheck when the EXTERNAL lift lands as lifecycleState=idle (tiann/hapi#1820)', async () => {
+        // `idle` is a live lifecycle: the CLI socket is up, only its agent
+        // has been quiet. A keepalive-idle row surfacing between preflight
+        // and the flip is the same race as `running`.
+        const cursorSessionId = 'external-resume-idle-uuid'
+        h.placeLegacyStore(cursorSessionId)
+        const session = h.makeSession({
+            metadata: { path: '/workspace/x', host: 'h', flavor: 'cursor', cursorSessionId }
+        })
+        const out = await makeMigrator(h, makeMockProbe(), {
+            getCurrentSession: () => ({ active: false, lifecycleState: 'idle' })
+        }).migrateOne(session, {})
+        expect(out.ok).toBe(false)
+        if (out.ok) return
+        expect(out.reason).toBe('session_resumed_during_migrate')
+        expect(h.updateCalls).toHaveLength(0)
     })
 
     it('rolls back when the legacy store.db is touched during the migration window (Codex #34 P1 v3)', async () => {

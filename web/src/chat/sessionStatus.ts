@@ -154,6 +154,12 @@ export function buildSessionStatusData(args: {
     blocks: readonly ChatBlock[]
     messages: readonly NormalizedMessage[]
     backgroundTaskCount?: number
+    /**
+     * Whether a turn is running. `false` retires unfinished subagent traces:
+     * nothing can still be driving them, so a Task block without a result is
+     * an aborted or lost trace, not live work. `undefined` keeps them.
+     */
+    thinking?: boolean
 }): SessionStatusData | null {
     const tools = collectToolBlocks(args.blocks)
     const detectedTerminals = buildBackgroundTerminals(tools, args.messages)
@@ -173,7 +179,8 @@ export function buildSessionStatusData(args: {
         tasks: args.tasks ? [...args.tasks] : [],
         subagents: tools
             .map(subagentFromBlock)
-            .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
+            .filter((subagent): subagent is SessionStatusSubagent => subagent !== null)
+            .filter((subagent) => args.thinking !== false || subagent.state !== 'running'),
         terminals,
         undiscoveredTerminalCount,
         possibleTerminalCommands

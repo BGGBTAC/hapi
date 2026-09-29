@@ -129,10 +129,20 @@ export const MetadataSchema = z.object({
     happyToolsDir: z.string().optional(),
     startedFromRunner: z.boolean().optional(),
     hostPid: z.number().optional(),
+    // Start marker of the reporting process (see cli getProcessStartMarker): lets the
+    // runner refuse to adopt a webhook whose PID has since been reused.
+    hostStartMarker: z.string().optional(),
     hapiMcpUrl: z.string().url().optional(),
     startedBy: z.enum(['runner', 'terminal']).optional(),
+    // 'running' | 'idle' | 'archived' (see shared/src/sessionLifecycle.ts).
+    // 'idle' is written by the hub's keepalive-idle reconciler (tiann/hapi#1820)
+    // and reverts to 'running' on the next agent progress.
     lifecycleState: z.string().optional(),
     lifecycleStateSince: z.number().optional(),
+    // Opt out of keepalive-idle reconciliation for sessions that are meant to
+    // sit quiet indefinitely (operator holding pens, sessions owning work the
+    // hub cannot see). Never reconciled to 'idle' while true.
+    idleReconcileExempt: z.boolean().optional(),
     archivedBy: z.string().optional(),
     archiveReason: z.string().optional(),
     // Set only after a completed fresh-session clear. The source row remains
