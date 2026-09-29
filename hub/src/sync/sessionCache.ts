@@ -27,8 +27,9 @@ export class SessionCache {
     /**
      * Last time the hub saw real agent progress per session (tiann/hapi#1820).
      * Deliberately NOT bumped by `session-alive`: keepalives are exactly the
-     * signal this clock has to be immune to. Seeded lazily from `updatedAt`,
-     * so a hub restart re-derives it from the last human turn on disk.
+     * signal this clock has to be immune to. Seeded lazily from the durable
+     * progress records on disk (see `getAgentProgressAt`), so a hub restart
+     * re-derives it without trusting `updatedAt`.
      */
     private readonly agentProgressAtBySessionId: Map<string, number> = new Map()
     private readonly sessionIdleTimeoutMs: number = resolveSessionIdleTimeoutMs()
@@ -629,7 +630,11 @@ export class SessionCache {
      */
     recordAgentProgress(sessionId: string, at: number = Date.now()): void {
         if (!Number.isFinite(at)) return
-        const previous = this.agentProgressAtBySessionId.get(sessionId) ?? 0
+        // Seed a cold entry from disk before comparing: an old timestamp
+        // arriving ahead of the first tick (a transcript backfill right after
+        // a hub restart) must not become the baseline that hides newer
+        // stored progress.
+        const previous = this.agentProgressAtBySessionId.get(sessionId) ?? this.seedAgentProgressAt(sessionId)
         if (at > previous) {
             this.agentProgressAtBySessionId.set(sessionId, at)
         }
@@ -637,24 +642,31 @@ export class SessionCache {
 
     /**
      * A cold cache (hub restart) has observed no progress of its own, so seed
-     * it once from disk.
+     * it once from disk: the newest stored message (assistant output never
+     * moves `updatedAt`, so a session that was streaming a minute before the
+     * restart must not read as hours idle), the todo / team-state clocks, and
+     * for a session that has none of those yet, its creation.
      *
-     * `updatedAt` alone is not enough: assistant messages deliberately do not
-     * move it, so a session that was streaming output a minute before the
-     * restart would read as hours idle and get marked on the very next tick.
-     * The newest stored message is the durable record of that output.
-     *
-     * `updatedAt` stays a floor on top of the seed, because todos / teamState
-     * / agentState writes bump it without routing through
-     * `recordAgentProgress`.
+     * `updatedAt` is deliberately not consulted, neither as seed nor as a
+     * floor. It moves on every CLI `update-metadata` write — a title, a
+     * summary, the idle mark itself echoed back after a version mismatch —
+     * and none of that is agent progress; reading it here lifted the mark on
+     * the very next tick and let a zombie hide behind its metadata churn.
      */
+    private seedAgentProgressAt(sessionId: string): number {
+        const session = this.sessions.get(sessionId) ?? this.store.sessions.getSession(sessionId)
+        const seeded = Math.max(
+            this.store.messages.getNewestMessagePosition(sessionId)?.at ?? 0,
+            session?.todosUpdatedAt ?? 0,
+            session?.teamStateUpdatedAt ?? 0,
+            session?.createdAt ?? 0
+        )
+        this.agentProgressAtBySessionId.set(sessionId, seeded)
+        return seeded
+    }
+
     private getAgentProgressAt(session: Session): number {
-        let observed = this.agentProgressAtBySessionId.get(session.id)
-        if (observed === undefined) {
-            observed = this.store.messages.getNewestMessagePosition(session.id)?.at ?? 0
-            this.agentProgressAtBySessionId.set(session.id, observed)
-        }
-        return Math.max(observed, session.updatedAt)
+        return this.agentProgressAtBySessionId.get(session.id) ?? this.seedAgentProgressAt(session.id)
     }
 
     /**
