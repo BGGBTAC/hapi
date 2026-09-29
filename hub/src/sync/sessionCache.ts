@@ -27,8 +27,9 @@ export class SessionCache {
     /**
      * Last time the hub saw real agent progress per session (tiann/hapi#1820).
      * Deliberately NOT bumped by `session-alive`: keepalives are exactly the
-     * signal this clock has to be immune to. Seeded lazily from `updatedAt`,
-     * so a hub restart re-derives it from the last human turn on disk.
+     * signal this clock has to be immune to. Seeded lazily from the durable
+     * progress records on disk (see `getAgentProgressAt`), so a hub restart
+     * re-derives it without trusting `updatedAt`.
      */
     private readonly agentProgressAtBySessionId: Map<string, number> = new Map()
     private readonly sessionIdleTimeoutMs: number = resolveSessionIdleTimeoutMs()
@@ -542,6 +543,25 @@ export class SessionCache {
         }
     }
 
+    /**
+     * Abort tree-kills the agent process and every background shell under it
+     * (cli/src/claude/sdk/query.ts cleanup), so the `<task-notification>` that
+     * would have closed the counter can never arrive. Forget the tasks, or the
+     * session reads as "working" until session-end and never reconciles idle
+     * (tiann/hapi#1820).
+     */
+    clearBackgroundTasks(sessionId: string): void {
+        const session = this.sessions.get(sessionId)
+        if (!session || (session.backgroundTaskCount ?? 0) === 0) return
+
+        session.backgroundTaskCount = 0
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId,
+            data: { backgroundTaskCount: 0 } satisfies SessionPatch
+        })
+    }
+
     applyBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
         const session = this.sessions.get(sessionId)
         if (!session) return
@@ -614,24 +634,29 @@ export class SessionCache {
 
     /**
      * A cold cache (hub restart) has observed no progress of its own, so seed
-     * it once from disk.
+     * it once from disk: the newest stored message (assistant output never
+     * moves `updatedAt`, so a session that was streaming a minute before the
+     * restart must not read as hours idle), the todo / team-state clocks, and
+     * for a session that has none of those yet, its creation.
      *
-     * `updatedAt` alone is not enough: assistant messages deliberately do not
-     * move it, so a session that was streaming output a minute before the
-     * restart would read as hours idle and get marked on the very next tick.
-     * The newest stored message is the durable record of that output.
-     *
-     * `updatedAt` stays a floor on top of the seed, because todos / teamState
-     * / agentState writes bump it without routing through
-     * `recordAgentProgress`.
+     * `updatedAt` is deliberately not consulted, neither as seed nor as a
+     * floor. It moves on every CLI `update-metadata` write — a title, a
+     * summary, the idle mark itself echoed back after a version mismatch —
+     * and none of that is agent progress; reading it here lifted the mark on
+     * the very next tick and let a zombie hide behind its metadata churn.
      */
     private getAgentProgressAt(session: Session): number {
         let observed = this.agentProgressAtBySessionId.get(session.id)
         if (observed === undefined) {
-            observed = this.store.messages.getNewestMessagePosition(session.id)?.at ?? 0
+            observed = Math.max(
+                this.store.messages.getNewestMessagePosition(session.id)?.at ?? 0,
+                session.todosUpdatedAt ?? 0,
+                session.teamStateUpdatedAt ?? 0,
+                session.createdAt
+            )
             this.agentProgressAtBySessionId.set(session.id, observed)
         }
-        return Math.max(observed, session.updatedAt)
+        return observed
     }
 
     /**
@@ -647,12 +672,12 @@ export class SessionCache {
      * Returns the session ids newly marked `idle`.
      */
     reconcileKeepaliveIdle(now: number = Date.now(), timeoutMs: number = this.sessionIdleTimeoutMs): string[] {
-        if (timeoutMs <= 0) return []
-
         const marked: string[] = []
         // Snapshot: a lifecycle write refreshes the cached Session in place.
+        // A disabled window (`timeoutMs <= 0`) never marks, but still walks
+        // the sessions so marks left by an earlier configuration get lifted.
         for (const session of Array.from(this.sessions.values())) {
-            const progressAt = this.getAgentProgressAt(session)
+            const progressAt = timeoutMs > 0 ? this.getAgentProgressAt(session) : 0
             if (shouldClearKeepaliveIdle(session, progressAt, now, timeoutMs)) {
                 this.writeLifecycleState(session.id, SESSION_LIFECYCLE_RUNNING)
                 continue

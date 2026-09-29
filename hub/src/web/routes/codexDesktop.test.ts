@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, mock } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -470,6 +470,74 @@ describe('Codex Desktop import routes', () => {
             expect(result.error).toContain('matching HAPI session is active')
             expect(store.sessions.getSessionsByNamespace('default')).toHaveLength(1)
             expect(store.messages.getAllMessages(liveSession.id)).toHaveLength(1)
+        } finally {
+            store.close()
+            rmSync(codexHome, { recursive: true, force: true })
+        }
+    })
+
+    it('refuses a transcript sync for an active Codex thread even when stored messages match its prefix (no new messages)', async () => {
+        // The narrower guard "active AND prefix mismatch" would let this
+        // request through to the metadata overwrite + recordSessionActivity
+        // path on a live session (CLI version mismatch, updatedAt bump, idle
+        // mark lifted). The transcript being fully imported already must not
+        // make the live session writable.
+        const codexHome = mkdtempSync(join(tmpdir(), 'hapi-codex-home-active-prefix-test-'))
+        const store = new Store(':memory:')
+        const codexSessionId = '20202020-2020-4020-8020-202020202020'
+        process.env.CODEX_HOME = codexHome
+
+        try {
+            createTranscript(codexHome, codexSessionId)
+            // First, an ordinary import while the thread is inactive: the
+            // stored messages now equal the transcript prefix exactly.
+            const imported = await importSelectedCodexSessions({
+                codexSessionIds: [codexSessionId],
+                store,
+                namespace: 'default',
+                getSyncEngine: () => null
+            })
+            expect(imported.success).toBe(true)
+            const stored = store.sessions.getSessionsByNamespace('default')[0]
+            expect(stored).toBeDefined()
+            expect(store.messages.getAllMessages(stored.id)).toHaveLength(2)
+            const renamed = store.sessions.updateSessionMetadata(
+                stored.id,
+                { ...(stored.metadata as Record<string, unknown>), name: 'renamed by the live CLI' },
+                stored.metadataVersion,
+                'default',
+                { touchUpdatedAt: false }
+            )
+            expect(renamed.result).toBe('success')
+            const before = store.sessions.getSession(stored.id)!
+
+            // Now the CLI has the thread open again.
+            const handleRealtimeEvent = mock(() => {})
+            const recordSessionActivity = mock(() => {})
+            const engine = {
+                getSessionsByNamespace: () => [{ ...before, active: true }],
+                getOnlineMachinesByNamespace: () => [],
+                handleRealtimeEvent,
+                recordSessionActivity
+            } as unknown as SyncEngine
+
+            const result = await importSelectedCodexSessions({
+                codexSessionIds: [codexSessionId],
+                store,
+                namespace: 'default',
+                getSyncEngine: () => engine
+            })
+
+            expect(result.success).toBe(false)
+            if (result.success) throw new Error('Expected active-session transcript sync to fail')
+            expect(result.error).toContain('matching HAPI session is active')
+            const after = store.sessions.getSession(stored.id)!
+            expect(after.metadataVersion).toBe(before.metadataVersion)
+            expect((after.metadata as Record<string, unknown>).name).toBe('renamed by the live CLI')
+            expect(after.updatedAt).toBe(before.updatedAt)
+            expect(store.messages.getAllMessages(stored.id)).toHaveLength(2)
+            expect(handleRealtimeEvent).not.toHaveBeenCalled()
+            expect(recordSessionActivity).not.toHaveBeenCalled()
         } finally {
             store.close()
             rmSync(codexHome, { recursive: true, force: true })

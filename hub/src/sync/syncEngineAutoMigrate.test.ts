@@ -307,6 +307,35 @@ describe('SyncEngine.maybeAutoMigrateLegacyCursorSession', () => {
             expect(getStoredMetadata(session.id)?.cursorMigrationState).toBe('ambiguous')
         })
 
+        // Codex review #34 P2 v7 + tiann/hapi#1820: an inactive row whose
+        // lifecycle still says live (`running`, or `idle` after keepalive
+        // reconciliation) is stale, and the flip must archive it in the same
+        // write — otherwise isLiveLifecycleState consumers keep treating the
+        // migrated ACP session as alive.
+        it.each(['running', 'idle'] as const)('flipCursorSessionProtocolToAcp archives a stale %s lifecycle on an inactive row', (lifecycleState) => {
+            const session = insertLegacy(`session-flip-stale-${lifecycleState}`)
+            const store = (engine as unknown as { store: Store }).store
+            const cache = (engine as unknown as { sessionCache: import('./sessionCache').SessionCache }).sessionCache
+
+            const initial = store.sessions.getSession(session.id)!
+            const initialMeta = initial.metadata as unknown as Record<string, unknown>
+            store.sessions.updateSessionMetadata(
+                session.id,
+                { ...initialMeta, lifecycleState } as unknown as typeof initial.metadata,
+                initial.metadataVersion,
+                'default',
+                { touchUpdatedAt: false }
+            )
+            cache.refreshSession(session.id)
+            expect(engine.getSession(session.id)?.active).toBe(false)
+            expect(getStoredMetadata(session.id)?.lifecycleState).toBe(lifecycleState)
+
+            const result = engine.flipCursorSessionProtocolToAcp(session.id, 'default', null)
+            expect(result.result).toBe('success')
+            expect(getStoredMetadata(session.id)?.cursorSessionProtocol).toBe('acp')
+            expect(getStoredMetadata(session.id)?.lifecycleState).toBe('archived')
+        })
+
         it('flipCursorSessionProtocolToAcp clears cursorMigrationState in the same metadata write that flips protocol', () => {
             const session = insertLegacy('session-flip-clears-flag')
             const store = (engine as unknown as { store: Store }).store

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, setSystemTime } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -46,16 +46,39 @@ function session(overrides: Partial<Session> = {}): Session {
 }
 
 describe('resolveSessionIdleTimeoutMs', () => {
+    const quiet = () => {}
+
     it('defaults when unset or unparseable', () => {
-        expect(resolveSessionIdleTimeoutMs({})).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '  ' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: 'soon' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '-1' })).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({}, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '  ' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: 'soon' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '-1' }, quiet)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
     })
 
     it('honours an explicit window, and 0 disables', () => {
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' })).toBe(3_600_000)
-        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '0' })).toBe(0)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' }, quiet)).toBe(3_600_000)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: ' 3600000 ' }, quiet)).toBe(3_600_000)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '0' }, quiet)).toBe(0)
+    })
+
+    it('refuses a suffixed value instead of reading "1h" as 1 ms, and says so', () => {
+        // parseInt("1h") === 1 would turn every quiet session idle on the
+        // next 5 s tick — a plausible operator typo with a drastic effect.
+        const warnings: string[] = []
+        const warn = (message: string) => { warnings.push(message) }
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '1h' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '12h' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '1e3' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '+5' }, warn)).toBe(DEFAULT_SESSION_IDLE_TIMEOUT_MS)
+        expect(warnings).toHaveLength(4)
+        expect(warnings[0]).toContain('"1h"')
+        expect(warnings[0]).toContain('whole milliseconds')
+    })
+
+    it('stays silent on a valid value', () => {
+        const warnings: string[] = []
+        expect(resolveSessionIdleTimeoutMs({ HAPI_SESSION_IDLE_TIMEOUT_MS: '3600000' }, (m) => { warnings.push(m) })).toBe(3_600_000)
+        expect(warnings).toEqual([])
     })
 })
 
@@ -125,6 +148,12 @@ describe('shouldClearKeepaliveIdle', () => {
 
     it('stays idle while nothing has happened', () => {
         expect(shouldClearKeepaliveIdle(idle(), NOW - 87 * HOUR, NOW, window)).toBe(false)
+    })
+
+    it('lifts an existing mark once the window is disabled', () => {
+        // Nothing else ever writes `running` back (the CLI only stamps it at
+        // bootstrap), so "disabled" has to mean "no marks", not "frozen".
+        expect(shouldClearKeepaliveIdle(idle(), NOW - 87 * HOUR, NOW, 0)).toBe(true)
     })
 
     it('ignores sessions that are not idle', () => {
@@ -278,5 +307,115 @@ describe('SessionCache.reconcileKeepaliveIdle', () => {
 
         expect(cache.reconcileKeepaliveIdle(later, 0)).toEqual([])
         expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+    })
+
+    it('disabling the window lifts marks left behind by an earlier configuration', () => {
+        const { store, cache, sessionId, later } = setup()
+        cache.handleSessionAlive({ sid: sessionId, time: Date.now() })
+        expect(cache.reconcileKeepaliveIdle(later, window)).toEqual([sessionId])
+        expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
+
+        // Operator sets HAPI_SESSION_IDLE_TIMEOUT_MS=0 and restarts the hub:
+        // a fresh cache over the same rows, the CLI still connected and still
+        // holding `running` locally, so nothing on its side rewrites the row.
+        const restarted = new SessionCache(store, createPublisher([]))
+        restarted.reloadAll()
+        restarted.handleSessionAlive({ sid: sessionId, time: Date.now() })
+        expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
+
+        expect(restarted.reconcileKeepaliveIdle(later, 0)).toEqual([])
+        expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+        expect((store.sessions.getSession(sessionId)!.metadata as { lifecycleState?: string }).lifecycleState).toBe('running')
+    })
+
+    it('a metadata write without agent progress does not lift the idle mark', () => {
+        const { store, cache, sessionId, later } = setup()
+        cache.handleSessionAlive({ sid: sessionId, time: Date.now() })
+        cache.reconcileKeepaliveIdle(later, window)
+        // Snapshot the scalars: the patch below mutates the cached object.
+        const idle = cache.getSession(sessionId)!
+        const { metadata: idleMetadata, metadataVersion: idleVersion, updatedAt: idleUpdatedAt } = idle
+        expect(idleMetadata?.lifecycleState).toBe('idle')
+
+        // The wall clock catches up with the mark, then the CLI writes
+        // metadata: it adopted the hub's `idle` after a version mismatch and
+        // retries with a changed title. Same handler and same store call as
+        // production (`update-metadata` touches `updated_at`).
+        setSystemTime(new Date(later))
+        try {
+            const handlers = new Map<string, (payload: unknown, ack?: (response: unknown) => void) => void>()
+            registerSessionHandlers({
+                on: (event: string, handler: (payload: unknown, ack?: (response: unknown) => void) => void) => {
+                    handlers.set(event, handler)
+                },
+                to: () => ({ emit: () => {} })
+            } as never, {
+                store,
+                resolveSessionAccess: (id: string) => {
+                    const stored = store.sessions.getSessionByNamespace(id, 'default')
+                    return stored ? { ok: true, value: stored } : { ok: false, reason: 'not-found' }
+                },
+                emitAccessError: () => {},
+                onWebappEvent: (event: SyncEvent) => {
+                    if (event.type === 'session-updated') cache.applySessionPatch(event.sessionId, event.data)
+                }
+            } as never)
+
+            let ack: unknown
+            handlers.get('update-metadata')?.({
+                sid: sessionId,
+                metadata: { ...idleMetadata, name: 'renamed while idle' },
+                expectedVersion: idleVersion
+            }, (response) => { ack = response })
+            expect(ack).toMatchObject({ result: 'success' })
+
+            const renamed = cache.getSession(sessionId)!
+            expect(renamed.metadata?.name).toBe('renamed while idle')
+            // The title change is list activity …
+            expect(renamed.updatedAt).toBeGreaterThanOrEqual(later)
+            expect(renamed.updatedAt).toBeGreaterThan(idleUpdatedAt)
+            // … but not agent progress: the next tick leaves the mark alone.
+            expect(cache.reconcileKeepaliveIdle(later + 1, window)).toEqual([])
+            expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
+
+            // Control: real progress at the same moment does wake it.
+            cache.recordAgentProgress(sessionId, later)
+            cache.reconcileKeepaliveIdle(later + 1, window)
+            expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+        } finally {
+            setSystemTime()
+        }
+    })
+
+    it('seeds a cold cache from todos / team-state clocks, not from updatedAt', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'hapi-1820-seed-'))
+        try {
+            const dbPath = join(dir, 'hapi.db')
+            const store = new Store(dbPath)
+            const cache = new SessionCache(store, createPublisher([]))
+            const sessionId = cache.getOrCreateSession(
+                'tag-seed',
+                { path: '/tmp/project', host: 'localhost', flavor: 'claude', lifecycleState: 'running' },
+                null,
+                'default'
+            ).id
+            const now = Date.now()
+            // Last message 80h ago, but the agent rewrote its todo list an hour
+            // ago (a TodoWrite lands inside a message the hub counts as
+            // progress; here only its durable clock survives the restart).
+            const raw = new Database(dbPath)
+            raw.prepare('UPDATE sessions SET created_at = ?, updated_at = ?, todos_updated_at = ? WHERE id = ?')
+                .run(now - 80 * HOUR, now - 80 * HOUR, now - 1 * HOUR, sessionId)
+            raw.close()
+
+            const restarted = new SessionCache(store, createPublisher([]))
+            restarted.reloadAll()
+            restarted.handleSessionAlive({ sid: sessionId, time: now })
+            expect(restarted.reconcileKeepaliveIdle(now, window)).toEqual([])
+            expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+            expect(restarted.reconcileKeepaliveIdle(now + 13 * HOUR, window)).toEqual([sessionId])
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
     })
 })
