@@ -670,12 +670,12 @@ export class SessionCache {
      * Returns the session ids newly marked `idle`.
      */
     reconcileKeepaliveIdle(now: number = Date.now(), timeoutMs: number = this.sessionIdleTimeoutMs): string[] {
-        if (timeoutMs <= 0) return []
-
         const marked: string[] = []
         // Snapshot: a lifecycle write refreshes the cached Session in place.
+        // A disabled window (`timeoutMs <= 0`) never marks, but still walks
+        // the sessions so marks left by an earlier configuration get lifted.
         for (const session of Array.from(this.sessions.values())) {
-            const progressAt = this.getAgentProgressAt(session)
+            const progressAt = timeoutMs > 0 ? this.getAgentProgressAt(session) : 0
             if (shouldClearKeepaliveIdle(session, progressAt, now, timeoutMs)) {
                 this.writeLifecycleState(session.id, SESSION_LIFECYCLE_RUNNING)
                 continue

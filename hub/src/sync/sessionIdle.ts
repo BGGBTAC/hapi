@@ -21,8 +21,9 @@ import type { Session } from '@hapi/protocol/types'
 export const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 12 * 60 * 60 * 1000
 
 /**
- * `HAPI_SESSION_IDLE_TIMEOUT_MS` window, in ms. `0` disables reconciliation
- * entirely; an unset or unparseable value falls back to the default.
+ * `HAPI_SESSION_IDLE_TIMEOUT_MS` window, in ms. `0` never marks a session
+ * idle (and lifts marks an earlier configuration left behind); an unset or
+ * unparseable value falls back to the default.
  *
  * Whole milliseconds only. `parseInt` would read "1h" as 1 ms and quietly
  * mark every session idle on the next tick, so a value with a suffix (or
@@ -95,7 +96,10 @@ export function shouldClearKeepaliveIdle(
     timeoutMs: number
 ): boolean {
     if (session.metadata?.lifecycleState !== SESSION_LIFECYCLE_IDLE) return false
-    // Opting out after the fact still lifts an existing mark.
-    if (session.metadata.idleReconcileExempt === true) return true
-    return timeoutMs > 0 && now - agentProgressAt <= timeoutMs
+    // Opting out after the fact still lifts an existing mark, and so does
+    // disabling the window: the CLI only stamps `running` at bootstrap, so a
+    // mark left behind by an earlier configuration would otherwise outlive
+    // the configuration that made it.
+    if (session.metadata.idleReconcileExempt === true || timeoutMs <= 0) return true
+    return now - agentProgressAt <= timeoutMs
 }

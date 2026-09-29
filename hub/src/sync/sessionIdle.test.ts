@@ -150,6 +150,12 @@ describe('shouldClearKeepaliveIdle', () => {
         expect(shouldClearKeepaliveIdle(idle(), NOW - 87 * HOUR, NOW, window)).toBe(false)
     })
 
+    it('lifts an existing mark once the window is disabled', () => {
+        // Nothing else ever writes `running` back (the CLI only stamps it at
+        // bootstrap), so "disabled" has to mean "no marks", not "frozen".
+        expect(shouldClearKeepaliveIdle(idle(), NOW - 87 * HOUR, NOW, 0)).toBe(true)
+    })
+
     it('ignores sessions that are not idle', () => {
         expect(shouldClearKeepaliveIdle(session(), NOW - 1 * HOUR, NOW, window)).toBe(false)
     })
@@ -295,11 +301,30 @@ describe('SessionCache.reconcileKeepaliveIdle', () => {
         expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
     })
 
-    it('does nothing when the window is disabled', () => {
+    it('never marks when the window is disabled', () => {
         const { cache, sessionId, later } = setup()
         cache.handleSessionAlive({ sid: sessionId, time: Date.now() })
 
         expect(cache.reconcileKeepaliveIdle(later, 0)).toEqual([])
         expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+    })
+
+    it('disabling the window lifts marks left behind by an earlier configuration', () => {
+        const { store, cache, sessionId, later } = setup()
+        cache.handleSessionAlive({ sid: sessionId, time: Date.now() })
+        expect(cache.reconcileKeepaliveIdle(later, window)).toEqual([sessionId])
+        expect(cache.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
+
+        // Operator sets HAPI_SESSION_IDLE_TIMEOUT_MS=0 and restarts the hub:
+        // a fresh cache over the same rows, the CLI still connected and still
+        // holding `running` locally, so nothing on its side rewrites the row.
+        const restarted = new SessionCache(store, createPublisher([]))
+        restarted.reloadAll()
+        restarted.handleSessionAlive({ sid: sessionId, time: Date.now() })
+        expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('idle')
+
+        expect(restarted.reconcileKeepaliveIdle(later, 0)).toEqual([])
+        expect(restarted.getSession(sessionId)!.metadata?.lifecycleState).toBe('running')
+        expect((store.sessions.getSession(sessionId)!.metadata as { lifecycleState?: string }).lifecycleState).toBe('running')
     })
 })
