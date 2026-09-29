@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { getProcessStartMarker } from '@/utils/process'
@@ -112,6 +112,7 @@ describe.skipIf(process.platform === 'win32')('untracked runner webhook adoption
         } finally {
             await stop(runner)
             await stop(child)
+            await rm(home, { recursive: true, force: true })
         }
     }, 30_000)
 
@@ -140,6 +141,7 @@ describe.skipIf(process.platform === 'win32')('untracked runner webhook adoption
         } finally {
             await stop(runner)
             await stop(bystander)
+            await rm(home, { recursive: true, force: true })
         }
     }, 30_000)
 })
