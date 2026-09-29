@@ -155,3 +155,40 @@ describe('SessionRowSummary background status', () => {
         expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent('New activity')
     })
 })
+
+describe('SessionRowSummary keepalive-idle (tiann/hapi#1820)', () => {
+    const idle = (overrides: Partial<SessionSummary> = {}) => makeSummary({
+        id: 'idle-row',
+        backgroundTaskCount: 0,
+        metadata: { path: '/demo/idle', name: 'Idle demo', flavor: 'claude', lifecycleState: 'idle' },
+        ...overrides
+    })
+
+    it('draws the idle marker in hint colour while nothing is in flight', () => {
+        render(
+            <I18nProvider>
+                <SessionRowSummary session={idle()} showDetailedStatus={false} />
+            </I18nProvider>
+        )
+
+        expect(screen.getByTestId('session-row-idle')).toHaveTextContent('Idle (keepalive only)')
+        expect(screen.getByTitle('Idle demo').className).toContain('text-[var(--app-hint)]')
+    })
+
+    it('reads as working again once the session is thinking, spinner and contrast alike', () => {
+        // The hub keeps the idle mark through ambient thinking churn
+        // (tiann/hapi#1553) and bucketRunningSessions files such a row under
+        // Working; the row must not spin inside a dimmed, idle-labelled line.
+        const { container } = render(
+            <I18nProvider>
+                <SessionRowSummary session={idle({ thinking: true })} showDetailedStatus={false} />
+            </I18nProvider>
+        )
+
+        expect(container.querySelector('.animate-spin-slow')).not.toBeNull()
+        expect(screen.queryByTestId('session-row-idle')).toBeNull()
+        const title = screen.getByTitle('Idle demo')
+        expect(title.className).toContain('text-[var(--app-fg)]')
+        expect(title.parentElement!.parentElement!.className).not.toContain('opacity-75')
+    })
+})

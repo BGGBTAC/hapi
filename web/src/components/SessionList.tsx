@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { SessionListScrollAnchor } from './SessionListScrollAnchor'
 import type { SessionSummary } from '@/types/api'
-import { SESSION_LIFECYCLE_IDLE } from '@hapi/protocol'
-import { isLiveSession, sessionLivenessRank } from '@/lib/sessionLiveness'
+import { isKeepaliveIdle, isLiveSession, sessionLivenessRank } from '@/lib/sessionLiveness'
 import type { ApiClient } from '@/api/client'
 import {
     buildSessionSearchScoreIndex,
@@ -117,7 +116,7 @@ export function bucketRunningSessions(
             buckets.working.push(session)
         } else if ((session.pendingRequestsCount ?? 0) > 0) {
             buckets.pending.push(session)
-        } else if (session.metadata?.lifecycleState === SESSION_LIFECYCLE_IDLE) {
+        } else if (isKeepaliveIdle(session)) {
             // Keepalive-only: socket up, no agent progress for hours.
             buckets.idle.push(session)
         } else {

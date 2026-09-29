@@ -119,4 +119,20 @@ describe('SessionList keepalive-idle lifecycle', () => {
         expect(panelOf(headers[0]).getAttribute('data-open')).toBe('true')
         expect(panelOf(headers[1]).getAttribute('data-open')).toBeNull()
     })
+
+    it('reads an idle row that is thinking again as live, like the pinned buckets do', () => {
+        // The hub keeps the idle mark through ambient thinking churn
+        // (tiann/hapi#1553), and bucketRunningSessions files such a row under
+        // Working. The default view has to agree: spinner, full contrast, and
+        // the group ranks with the live ones instead of below them.
+        renderSessionList([{ ...zombie, thinking: true }, live])
+
+        const row = screen.getByTitle('Zombie task').closest('button')!
+        expect(within(row).queryByTestId('session-row-idle')).toBeNull()
+        expect(row.querySelector('.animate-spin-slow')).not.toBeNull()
+        expect(screen.getByTitle('Zombie task').className).toContain('text-[var(--app-fg)]')
+
+        const headers = screen.getAllByTitle(/^\/work\/(zombie|live)$/)
+        expect(headers.map((header) => header.getAttribute('title'))).toEqual(['/work/zombie', '/work/live'])
+    })
 })
