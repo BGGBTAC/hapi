@@ -133,8 +133,12 @@ export function buildSessionMetadata(options: {
         startedFromRunner: options.startedBy === 'runner',
         hostPid: process.pid,
         // Proves which process generation owns hostPid: the runner adopts an
-        // untracked webhook only when this matches the live PID.
-        hostStartMarker: getProcessStartMarker(process.pid) ?? undefined,
+        // untracked runner-started webhook only when this matches the live
+        // PID. It never reads the marker of a terminal session, so skip the
+        // probe there (on Windows it is a synchronous PowerShell spawn).
+        ...(options.startedBy === 'runner'
+            ? { hostStartMarker: getProcessStartMarker(process.pid) ?? undefined }
+            : {}),
         startedBy: options.startedBy,
         lifecycleState: 'running',
         lifecycleStateSince: now,
