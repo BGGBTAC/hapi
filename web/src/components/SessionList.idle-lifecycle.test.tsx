@@ -96,7 +96,9 @@ describe('SessionList keepalive-idle lifecycle', () => {
         const section = screen.getByTitle('Active sessions').parentElement!
         expect(within(section).getByText('Idle (keepalive only) (1)')).toBeTruthy()
         expect(within(section).getByTitle('Zombie task')).toBeTruthy()
-        expect(within(section).getByTestId('session-row-idle')).toBeTruthy()
+        // The bucket header already says "Idle (keepalive only)"; the row in
+        // it carries the dot alone, not the label a second time.
+        expect(within(section).getByTestId('session-row-idle').textContent).not.toContain('Idle (keepalive only)')
     })
 
     it('marks an idle row in the default view and ranks its group below a live one', () => {
