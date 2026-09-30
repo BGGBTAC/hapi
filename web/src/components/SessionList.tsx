@@ -950,6 +950,7 @@ function SessionItem(props: {
     selected?: boolean
     showDetailedStatus?: boolean
     inRunningSection?: boolean
+    inIdleBucket?: boolean
     projectLabel?: string
     machineLabel?: string
     lastSeenVersion: number
@@ -965,6 +966,7 @@ function SessionItem(props: {
         selected = false,
         showDetailedStatus = false,
         inRunningSection = false,
+        inIdleBucket = false,
         projectLabel,
         machineLabel,
         lastSeenVersion
@@ -1091,6 +1093,7 @@ function SessionItem(props: {
                     lastSeenVersion={lastSeenVersion}
                     scheduleTooltipId={scheduleId}
                     inRunningSection={inRunningSection}
+                    inIdleBucket={inIdleBucket}
                     projectLabel={projectLabel}
                     machineLabel={machineLabel}
                 />
@@ -1591,6 +1594,7 @@ export function SessionList(props: {
                                             selected={s.id === selectedSessionId}
                                             showDetailedStatus={showDetailedStatus}
                                             inRunningSection
+                                            inIdleBucket={bucketKey === 'idle'}
                                             projectLabel={getPathDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
                                             machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
                                             lastSeenVersion={lastSeenVersion}

@@ -116,6 +116,8 @@ export function SessionRowSummary(props: {
     className?: string
     /** Rows inside the pinned "in progress" section skip the text label (dot only). */
     inRunningSection?: boolean
+    /** Rows inside the pinned idle bucket: its heading carries the idle label, so the row shows the dot alone. */
+    inIdleBucket?: boolean
     /** Short project name shown under the title (pinned "in progress" rows). */
     projectLabel?: string
     /** Machine label shown next to the project name (pinned "in progress" rows). */
@@ -132,6 +134,7 @@ export function SessionRowSummary(props: {
         scheduleTooltipId: scheduleTooltipIdProp,
         className,
         inRunningSection = false,
+        inIdleBucket = false,
         projectLabel,
         machineLabel,
     } = props
@@ -236,20 +239,6 @@ export function SessionRowSummary(props: {
                                 <span className="text-[11px] font-medium leading-none">{t('session.item.pending')}</span>
                             ) : null}
                         </span>
-                    ) : isKeepaliveIdle(s) ? (
-                        // tiann/hapi#1820: connected, but keepalives only. The
-                        // pinned idle bucket already carries the label, so
-                        // rows in there get the dot alone.
-                        <span
-                            className="inline-flex shrink-0 items-center gap-1 text-[var(--app-hint)]"
-                            title={t('session.item.idle')}
-                            data-testid="session-row-idle"
-                        >
-                            <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
-                            {!inRunningSection ? (
-                                <span className="text-[11px] font-medium leading-none">{t('session.item.idle')}</span>
-                            ) : null}
-                        </span>
                     ) : attention && nestedTooltips && attentionId ? (
                         <SessionAttentionIndicator
                             attention={attention}
@@ -263,6 +252,25 @@ export function SessionRowSummary(props: {
                             title={attentionLabel ?? undefined}
                             aria-label={attentionLabel ?? undefined}
                         />
+                    ) : null}
+                    {isKeepaliveIdle(s) && !s.thinking ? (
+                        // tiann/hapi#1820: connected, but keepalives only. Drawn
+                        // next to whatever attention the row carries (an unread
+                        // dot does not make the agent any less idle). The pinned
+                        // idle bucket's heading already carries the label, so
+                        // rows in there get the dot alone; a globally pinned
+                        // idle row sits under the generic Pinned heading and
+                        // keeps its label.
+                        <span
+                            className="inline-flex shrink-0 items-center gap-1 text-[var(--app-hint)]"
+                            title={t('session.item.idle')}
+                            data-testid="session-row-idle"
+                        >
+                            <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+                            {!inIdleBucket ? (
+                                <span className="text-[11px] font-medium leading-none">{t('session.item.idle')}</span>
+                            ) : null}
+                        </span>
                     ) : null}
                     {hasScheduleTooltip && nestedTooltips && scheduleId ? (
                         <HoverTooltip
